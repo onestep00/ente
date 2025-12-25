@@ -27,12 +27,10 @@ import "package:photos/models/base/id.dart";
 import "package:photos/models/ffmpeg/ffprobe_props.dart";
 import "package:photos/models/file/file.dart";
 import "package:photos/models/file/file_type.dart";
-import "package:photos/models/metadata/file_magic.dart";
 import "package:photos/models/preview/playlist_data.dart";
 import "package:photos/models/preview/preview_item.dart";
 import "package:photos/models/preview/preview_item_status.dart";
 import "package:photos/service_locator.dart";
-import "package:photos/services/file_magic_service.dart";
 import "package:photos/services/filedata/model/file_data.dart";
 import "package:photos/services/isolated_ffmpeg_service.dart";
 import "package:photos/services/machine_learning/compute_controller.dart";
@@ -60,7 +58,6 @@ class VideoPreviewService {
         filesDB = FilesDB.instance,
         uploadLocksDB = UploadLocksDB.instance,
         ffmpegService = IsolatedFfmpegService.instance,
-        fileMagicService = FileMagicService.instance,
         cacheManager = DefaultCacheManager(),
         videoCacheManager = VideoCacheManager.instance,
         config = Configuration.instance {
@@ -88,7 +85,6 @@ class VideoPreviewService {
     this.serviceLocator,
     this.filesDB,
     this.uploadLocksDB,
-    this.fileMagicService,
     this.ffmpegService,
     this.cacheManager,
     this.videoCacheManager,
@@ -105,7 +101,6 @@ class VideoPreviewService {
   final ServiceLocator serviceLocator;
   final FilesDB filesDB;
   final UploadLocksDB uploadLocksDB;
-  final FileMagicService fileMagicService;
   final IsolatedFfmpegService ffmpegService;
   final DefaultCacheManager cacheManager;
   final CacheManager videoCacheManager;
@@ -415,7 +410,7 @@ class VideoPreviewService {
       _logger.info(
         "Starting video preview generation for ${enteFile.displayName}",
       );
-      // elimination case for <=10 MB with H.264
+      // preflight checks for preview generation
       final isManual =
           await uploadLocksDB.isInStreamQueue(enteFile.uploadedFileID!);
       var (props, result, file) =
@@ -508,11 +503,20 @@ class VideoPreviewService {
         'Generating HLS Playlist ${enteFile.displayName} at $prefix/output.m3u8',
       );
 
-      final reencodeVideo =
-          !(isH264 && bitrate != null && bitrate <= 4000 * 1000);
-      final rescaleVideo = !(bitrate != null && bitrate <= 2000 * 1000);
+      const int maxTargetBitrateKbps = 10000;
+      const int maxTargetBufferKbps = 20000;
+      const int rescaleBitrateThresholdKbps = 4000;
+      const int maxTargetFps = 60;
+      const int maxTargetDimension = 1080;
+
+      final reencodeVideo = !(isH264 &&
+          bitrate != null &&
+          bitrate <= maxTargetBitrateKbps * 1000);
+      final rescaleVideo = !(bitrate != null &&
+          bitrate <= rescaleBitrateThresholdKbps * 1000);
       final needsTonemap = isHDR;
-      final applyFPS = (double.tryParse(props?.fps ?? "") ?? 100) > 30;
+      final applyFPS =
+          (double.tryParse(props?.fps ?? "") ?? 100) > maxTargetFps;
 
       String filters = "";
 
@@ -520,14 +524,14 @@ class VideoPreviewService {
         final videoFilters = <String>[];
 
         if (rescaleVideo || needsTonemap) {
-          // scale smaller dimension to 720p (or keep original if less than 720p)
-          // portrait: scale width to min(720,iw), landscape: scale height to min(720,ih)
+          // scale smaller dimension to 1080p (or keep original if less than 1080p)
+          // portrait: scale width to min(1080,iw), landscape: scale height to min(1080,ih)
           videoFilters.add(
-            "scale='if(lt(iw,ih),min(720,iw),-2)':'if(lt(iw,ih),-2,min(720,ih))'",
+            "scale='if(lt(iw,ih),min($maxTargetDimension,iw),-2)':'if(lt(iw,ih),-2,min($maxTargetDimension,ih))'",
           );
 
-          // reduce fps to 30 if it is more than 30
-          if (applyFPS) videoFilters.add("fps=30");
+          // cap fps at 60 if it is higher
+          if (applyFPS) videoFilters.add("fps=$maxTargetFps");
         }
 
         if (needsTonemap) {
@@ -547,8 +551,8 @@ class VideoPreviewService {
       final command =
           // scaling, fps, tonemapping
           '$filters'
-          // video encoding with maxrate cap at 2000kbps to preserve smaller bitrates
-          '${reencodeVideo ? '-c:v libx264 -maxrate 2000k -bufsize 4000k ' : '-c:v copy '}'
+          // video encoding tuned for faster mobile encoding with a higher bitrate cap
+          '${reencodeVideo ? '-c:v libx264 -preset veryfast -crf 23 -tune fastdecode -maxrate ${maxTargetBitrateKbps}k -bufsize ${maxTargetBufferKbps}k -profile:v high -level 4.2 ' : '-c:v copy '}'
           // audio encoding
           '-c:a aac -b:a 128k '
           // hls options
@@ -1089,24 +1093,6 @@ class VideoPreviewService {
     EnteFile enteFile, [
     bool isManual = false,
   ]) async {
-    if ((enteFile.pubMagicMetadata?.sv ?? 0) == 1) {
-      _logger.info("Skip Preview due to sv=1 for  ${enteFile.displayName}");
-      return (null, true, null);
-    }
-    if (!isManual) {
-      if (enteFile.fileSize == null || enteFile.duration == null) {
-        _logger.warning(
-          "Skip Preview due to misisng size/duration for ${enteFile.displayName}",
-        );
-        return (null, true, null);
-      }
-      final int size = enteFile.fileSize!;
-      final int duration = enteFile.duration!;
-      if (size >= 500 * 1024 * 1024 || duration > 60) {
-        _logger.info("Skip Preview due to size: $size or duration: $duration");
-        return (null, true, null);
-      }
-    }
     FFProbeProps? props;
     File? file;
     bool skipFile = false;
@@ -1121,22 +1107,6 @@ class VideoPreviewService {
         file = await getFile(enteFile, isOrigin: true);
         if (file != null) {
           props = await getVideoPropsAsync(file);
-          final videoData = List.from(
-            props?.propData?["streams"] ?? [],
-          ).firstWhereOrNull((e) => e["type"] == "video");
-          final codec = videoData["codec_name"]?.toString().toLowerCase();
-          skipFile = codec?.contains("h264") ?? false;
-
-          if (skipFile) {
-            _logger.info(
-              "[init] Ignoring file ${enteFile.displayName} for preview due to codec",
-            );
-            await fileMagicService.updatePublicMagicMetadata(
-              [enteFile],
-              {streamVersionKey: 1},
-            );
-            return (props, skipFile, file);
-          }
         }
       }
     } catch (e, sT) {
@@ -1145,8 +1115,8 @@ class VideoPreviewService {
     return (props, skipFile, file);
   }
 
-  // generate stream for all files after cutoff date
-  // returns false if it fails to launch chuncking function
+  // generate stream for all eligible files
+  // returns false if it fails to launch chunking function
   Future<bool> _putFilesForPreviewCreation() async {
     if (!isVideoStreamingEnabled || !await canUseHighBandwidth()) return false;
 
@@ -1180,13 +1150,13 @@ class VideoPreviewService {
     } catch (_) {}
 
     final files = await _getFiles(
-      beginDate: DateTime.now().subtract(const Duration(days: 60)),
+      beginDate: null,
       onlyFilesWithLocalId: true,
     );
     final previewIds = fileDataService.previewIds;
 
     _logger.info(
-      "[init] Found ${files.length} files in last 60 days, ${manualQueueFiles.length} manual queue files: ${manualQueueFiles.keys.toList()}",
+      "[init] Found ${files.length} eligible files, ${manualQueueFiles.length} manual queue files: ${manualQueueFiles.keys.toList()}",
     );
 
     // Add manual queue files first (they have priority)
@@ -1202,7 +1172,7 @@ class VideoPreviewService {
         continue;
       }
 
-      // First try to find the file in the 60-day list
+      // First try to find the file in the eligible list
       var queueFile = files.firstWhereOrNull(
         (f) => f.uploadedFileID == queueFileId,
       );

@@ -10,7 +10,6 @@ import 'package:photos/models/file/file.dart';
 import 'package:photos/models/file/file_type.dart';
 import 'package:photos/models/metadata/file_magic.dart';
 import 'package:photos/service_locator.dart';
-import 'package:photos/services/file_magic_service.dart';
 import 'package:photos/services/filedata/model/file_data.dart';
 import 'package:photos/services/isolated_ffmpeg_service.dart';
 import 'package:photos/services/video_preview_service.dart';
@@ -22,7 +21,6 @@ import 'video_preview_status_test.mocks.dart';
   Configuration,
   FilesDB,
   UploadLocksDB,
-  FileMagicService,
   IsolatedFfmpegService,
   Dio,
   DefaultCacheManager,
@@ -34,7 +32,6 @@ void main() {
   late MockConfiguration mockConfiguration;
   late MockFilesDB mockFilesDB;
   late MockUploadLocksDB mockUploadLocksDB;
-  late MockFileMagicService mockFileMagicService;
   late MockIsolatedFfmpegService mockFfmpegService;
   late MockDefaultCacheManager mockCacheManager;
   late MockCacheManager mockVideoCacheManager;
@@ -44,7 +41,6 @@ void main() {
     mockConfiguration = MockConfiguration();
     mockFilesDB = MockFilesDB();
     mockUploadLocksDB = MockUploadLocksDB();
-    mockFileMagicService = MockFileMagicService();
     mockFfmpegService = MockIsolatedFfmpegService();
     mockCacheManager = MockDefaultCacheManager();
     mockVideoCacheManager = MockCacheManager();
@@ -54,7 +50,6 @@ void main() {
       mockServiceLocator,
       mockFilesDB,
       mockUploadLocksDB,
-      mockFileMagicService,
       mockFfmpegService,
       mockCacheManager,
       mockVideoCacheManager,

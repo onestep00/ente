@@ -27,6 +27,15 @@ import {
 const ffmpegPathPlaceholder = "FFMPEG";
 const inputPathPlaceholder = "INPUT";
 const outputPathPlaceholder = "OUTPUT";
+const ffmpegPathOverrideEnvVar = "ENTE_FFMPEG_PATH";
+const ffmpegVideoEncoderOverrideEnvVar = "ENTE_FFMPEG_VIDEO_ENCODER";
+const qsvVideoEncoder = "h264_qsv";
+const softwareVideoEncoder = "libx264";
+
+type VideoEncoder = "h264_qsv" | "libx264";
+
+let cachedAvailableEncoders: Set<string> | undefined;
+let cachedPreferredVideoEncoder: VideoEncoder | undefined;
 
 /**
  * The interface of the object exposed by `ffmpeg-worker.ts` on the message port
@@ -170,14 +179,67 @@ const substitutePlaceholders = (
 /**
  * Return the path to the `ffmpeg` binary.
  *
+ * If `ENTE_FFMPEG_PATH` is set, it is used instead of the bundled binary.
+ *
  * At runtime, the FFmpeg binary is present in a path like (macOS example):
  * `ente.app/Contents/Resources/app.asar.unpacked/node_modules/ffmpeg-static/ffmpeg`
  */
 const ffmpegBinaryPath = () => {
+    const override = process.env[ffmpegPathOverrideEnvVar]?.trim();
+    if (override) return override;
     // This substitution of app.asar by app.asar.unpacked is suggested by the
     // ffmpeg-static library author themselves:
     // https://github.com/eugeneware/ffmpeg-static/issues/16
     return pathToFfmpeg!.replace("app.asar", "app.asar.unpacked");
+};
+
+const ffmpegEncoders = async () => {
+    if (cachedAvailableEncoders) return cachedAvailableEncoders;
+    try {
+        const { stdout, stderr } = await execAsyncWorker([
+            ffmpegBinaryPath(),
+            "-hide_banner",
+            "-encoders",
+        ]);
+        const output = `${stdout}\n${stderr}`;
+        const encoders = new Set<string>();
+        for (const match of output.matchAll(/^\s*[A-Z.]{6}\s+(\S+)/gm)) {
+            encoders.add(match[1]!);
+        }
+        cachedAvailableEncoders = encoders;
+    } catch (e) {
+        log.warn("Could not query ffmpeg encoders, falling back to libx264", e);
+        cachedAvailableEncoders = new Set<string>();
+    }
+    return cachedAvailableEncoders;
+};
+
+const resolvePreferredVideoEncoder = async (): Promise<VideoEncoder> => {
+    if (cachedPreferredVideoEncoder) return cachedPreferredVideoEncoder;
+    const encoders = await ffmpegEncoders();
+    const override = process.env[ffmpegVideoEncoderOverrideEnvVar]?.trim();
+    if (override) {
+        if (override === qsvVideoEncoder) {
+            if (encoders.has(qsvVideoEncoder)) {
+                cachedPreferredVideoEncoder = qsvVideoEncoder;
+                return cachedPreferredVideoEncoder;
+            }
+            log.warn(
+                `Requested ${qsvVideoEncoder} via ${ffmpegVideoEncoderOverrideEnvVar}, but encoder is unavailable`,
+            );
+        } else if (override === softwareVideoEncoder) {
+            cachedPreferredVideoEncoder = softwareVideoEncoder;
+            return cachedPreferredVideoEncoder;
+        } else {
+            log.warn(
+                `Unknown ${ffmpegVideoEncoderOverrideEnvVar} value '${override}', falling back to auto`,
+            );
+        }
+    }
+    cachedPreferredVideoEncoder = encoders.has(qsvVideoEncoder)
+        ? qsvVideoEncoder
+        : softwareVideoEncoder;
+    return cachedPreferredVideoEncoder;
 };
 
 /**
@@ -222,13 +284,16 @@ export interface FFmpegGenerateHLSPlaylistAndSegmentsResult {
  * Overview of the cases:
  *
  *     H.264, <= 10 MB              - Skip
- *     H.264, <= 4000 kb/s bitrate  - Don't re-encode video stream
- *     !HDR, <= 2000 kb/s bitrate   - Don't apply the scale+fps filter
+ *     Prefer h264_qsv when available, fallback to libx264
+ *     Target up to 1080p, <=60 fps, ~6-10 Mbps
  *     HDR                          - Apply tonemap (zscale+tonemap+zscale)
  *
  * Example invocation:
  *
- *     ffmpeg -i in.mov -vf "scale='if(lt(iw,ih),min(720,iw),-2)':'if(lt(iw,ih),-2,min(720,ih))',fps=30,zscale=transfer=linear,tonemap=tonemap=hable:desat=0,zscale=primaries=709:transfer=709:matrix=709,format=yuv420p" -c:v libx264 -c:a aac -f hls -hls_key_info_file out.m3u8.info -hls_list_size 0 -hls_flags single_file out.m3u8
+ *     ffmpeg -i in.mov -vf "scale='if(lt(iw,ih),min(1080,iw),-2)':'if(lt(iw,ih),-2,min(1080,ih))',fps=60,zscale=transfer=linear,tonemap=tonemap=hable:desat=0,zscale=primaries=709:transfer=709:matrix=709,format=yuv420p" -c:v libx264 -c:a aac -f hls -hls_key_info_file out.m3u8.info -hls_list_size 0 -hls_flags single_file out.m3u8
+ * Targets up to 1080p, clamps to 60 fps, and uses ~8 Mbps with a 10 Mbps max
+ * rate.
+ * When h264_qsv is available, we switch the encoder and use format=nv12.
  *
  * See: [Note: Preview variant of videos]
  *
@@ -261,10 +326,13 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
     fetchURL: string,
     authToken: string,
 ): Promise<FFmpegGenerateHLSPlaylistAndSegmentsResult | undefined> => {
-    const { isH264, isHDR, bitrate } =
+    const { isH264, isHDR, bitrate, width, height, fps } =
         await detectVideoCharacteristics(inputFilePath);
 
-    log.debugString(JSON.stringify({ isH264, isHDR, bitrate }));
+    const targetMaxDimension = 1080;
+    const targetMaxFps = 60;
+    const targetMinBitrate = 6000 * 1000;
+    const targetMaxBitrate = 10000 * 1000;
 
     // If the video is smaller than 10 MB, and already H.264 (the codec we are
     // going to use for the conversion), then a streaming variant is not much
@@ -297,15 +365,33 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
         }
     }
 
-    // If the video is already H.264 with a bitrate less than 4000 kbps, then we
-    // do not need to reencode the video stream (by _far_ the costliest part of
-    // the HLS stream generation).
-    const reencodeVideo = !(isH264 && bitrate && bitrate <= 4000 * 1000);
+    // If the video is already H.264, then we only reencode if we need to adjust
+    // resolution, fps, bitrate, or tonemap.
+    const rescaleVideo =
+        !width || !height || Math.min(width, height) > targetMaxDimension;
+    const clampFps = fps !== undefined && fps > targetMaxFps;
+    const needsBitrateAdjust =
+        !bitrate ||
+        bitrate < targetMinBitrate ||
+        bitrate > targetMaxBitrate;
+    const reencodeVideo =
+        !isH264 || isHDR || rescaleVideo || clampFps || needsBitrateAdjust;
+    const preferredVideoEncoder = reencodeVideo
+        ? await resolvePreferredVideoEncoder()
+        : undefined;
 
-    // If the bitrate is not too high, then we don't need to rescale the video
-    // when generating the video stream. This is not a performance optimization,
-    // but more for avoiding making the video size smaller unnecessarily.
-    const rescaleVideo = !(bitrate && bitrate <= 2000 * 1000);
+    log.debugString(
+        JSON.stringify({
+            isH264,
+            isHDR,
+            bitrate,
+            width,
+            height,
+            fps,
+            reencodeVideo,
+            preferredVideoEncoder,
+        }),
+    );
 
     // [Note: Tonemapping HDR to HD]
     //
@@ -412,7 +498,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
 
     // Overview:
     //
-    // - Video H.264 HD 720p (max) 30fps.
+    // - Video H.264, up to 1080p/60fps.
     // - Audio AAC 128kbps.
     // - Encrypted HLS playlist with a single file containing all the chunks.
     //
@@ -420,112 +506,117 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
     // - `man ffmpeg-all`
     // - https://trac.ffmpeg.org/wiki/Encode/H.264
     //
-    const command = [
-        ffmpegBinaryPath(),
-        // Reduce the amount of output lines we have to parse.
-        ["-hide_banner"],
-        // Input file. We don't need any extra options that apply to the input file.
-        "-i",
-        inputFilePath,
-        // The remaining options apply to the next output file (`playlistPath`).
+    const scaleFilter = `scale='if(lt(iw,ih),min(${targetMaxDimension},iw),-2)':'if(lt(iw,ih),-2,min(${targetMaxDimension},ih))'`;
+    const buildVideoFilters = (encoder: VideoEncoder | undefined) => {
+        const videoFilters: string[] = [];
+        if (rescaleVideo || tonemap) {
+            // Scale smaller dimension to the target max (or keep original if less).
+            // Portrait videos scale width, landscape videos scale height. -2 keeps
+            // aspect ratio with even pixel count.
+            videoFilters.push(scaleFilter);
+        }
+        if (clampFps) {
+            // Clamp high-fps inputs to the target maximum.
+            videoFilters.push(`fps=${targetMaxFps}`);
+        }
+        if (tonemap) {
+            // Convert the colorspace if the video is HDR. Before conversion, tone
+            // map colors so that they work the same across the change in the
+            // dyamic range.
+            //
+            // 1. The tonemap filter only works linear light, so we first use
+            //    zscale with transfer=linear to linearize the input.
+            //
+            // 2. Then we use the tonemap, with the hable option that is best for
+            //    preserving details. desat=0 turns off the default desaturation.
+            //
+            // 3. Use zscale again to "convert to BT.709" by asking it to set the
+            //    all three of color primaries, transfer characteristics and
+            //    colorspace matrix to 709 (Note: the constants specified in the
+            //    tonemap filter help do not include the "bt" prefix)
+            //
+            // See: https://ffmpeg.org/ffmpeg-filters.html#tonemap-1
+            //
+            // See: [Note: Tonemapping HDR to HD]
+            videoFilters.push(
+                "zscale=transfer=linear",
+                "tonemap=tonemap=hable:desat=0",
+                "zscale=primaries=709:transfer=709:matrix=709",
+            );
+        }
+        const pixelFormat =
+            encoder === qsvVideoEncoder ? "nv12" : "yuv420p";
+        // Output using a format suitable for the selected encoder.
+        videoFilters.push(`format=${pixelFormat}`);
+        return videoFilters;
+    };
+
+    const buildVideoFilterArgs = (encoder: VideoEncoder | undefined) =>
         reencodeVideo
             ? [
                   // `-vf` creates a filter graph for the video stream. It is a
                   // comma separated list of filters chained together, e.g.
                   // `filter1=key=value:key=value.filter2=key=value`.
                   "-vf",
-                  [
-                      // Do the rescaling to even number of pixels always if the
-                      // tonemapping is going to be applied subsequently,
-                      // otherwise the tonemapping will fail with "image
-                      // dimensions must be divisible by subsampling factor".
-                      //
-                      // While we add the extra condition here for completeness,
-                      // it won't usually matter since a non-BT.709 video is
-                      // likely using a new codec, and as such would've a high
-                      // enough bitrate to require rescaling anyways.
-                      rescaleVideo || tonemap
-                          ? [
-                                // Scale smaller dimension to 720p (or keep
-                                // original if less than 720p). Portrait videos
-                                // scale width, landscape videos scale height.
-                                // -2 keeps aspect ratio with even pixel count.
-                                "scale='if(lt(iw,ih),min(720,iw),-2)':'if(lt(iw,ih),-2,min(720,ih))'",
-                                // Convert the video to a constant 30 fps,
-                                // duplicating or dropping frames as necessary.
-                                "fps=30",
-                            ]
-                          : [],
-                      // Convert the colorspace if the video is HDR. Before
-                      // conversion, tone map colors so that they work the same
-                      // across the change in the dyamic range.
-                      //
-                      // 1. The tonemap filter only works linear light, so we
-                      //    first use zscale with transfer=linear to linearize
-                      //    the input.
-                      //
-                      // 2. Then we use the tonemap, with the hable option that
-                      //    is best for preserving details. desat=0 turns off
-                      //    the default desaturation.
-                      //
-                      // 3. Use zscale again to "convert to BT.709" by asking it
-                      //    to set the all three of color primaries, transfer
-                      //    characteristics and colorspace matrix to 709 (Note:
-                      //    the constants specified in the tonemap filter help
-                      //    do not include the "bt" prefix)
-                      //
-                      // See: https://ffmpeg.org/ffmpeg-filters.html#tonemap-1
-                      //
-                      // See: [Note: Tonemapping HDR to HD]
-                      tonemap
-                          ? [
-                                "zscale=transfer=linear",
-                                "tonemap=tonemap=hable:desat=0",
-                                "zscale=primaries=709:transfer=709:matrix=709",
-                            ]
-                          : [],
-                      // Output using the well supported pixel format: 8-bit YUV
-                      // planar color space with 4:2:0 chroma subsampling.
-                      "format=yuv420p",
-                  ]
-                      .flat()
-                      .join(","),
+                  buildVideoFilters(encoder).join(","),
               ]
-            : [],
-        reencodeVideo
-            ? // Video codec H.264
-              //
-              // - `-c:v libx264` converts the video stream to the H.264 codec.
-              //
-              // - We use CRF 23 (default) for quality, but cap the bitrate at
-              //   2000 kbps using `-maxrate` to ensure smaller bitrates are
-              //   preserved while preventing CRF from exceeding 2000 kbps.
-              //
-              // - `-bufsize` is set to 2x maxrate for smooth rate control.
-              //
-              // - We don't supply a preset, it'll use the default ("medium").
-              ["-c:v", "libx264", "-maxrate", "2000k", "-bufsize", "4000k"]
-            : // Keep the video stream unchanged
-              ["-c:v", "copy"],
-        // Audio codec AAC
-        //
-        // - `-c:a aac` converts the audio stream to use the AAC codec
-        //
-        // - We don't supply a bitrate, it'll use the AAC default 128k bps.
-        ["-c:a", "aac"],
-        // Generate a HLS playlist.
-        ["-f", "hls"],
-        // Tell ffmpeg where to find the key, and the URI for the key to write
-        // into the generated playlist. Implies "-hls_enc 1".
-        ["-hls_key_info_file", keyInfoPath],
-        // Generate as many playlist entries as needed (default limit is 5).
-        ["-hls_list_size", "0"],
-        // Place all the video segments within the same .ts file (with the same
-        // path as the playlist file but with a ".ts" extension).
-        ["-hls_flags", "single_file"],
-        // Output path where the playlist should be generated.
-        playlistPath,
-    ].flat();
+            : [];
+
+    // Video codec H.264
+    //
+    // - `-c:v libx264` converts the video stream to the H.264 codec.
+    // - `-c:v h264_qsv` uses Intel Quick Sync when available.
+    //
+    // - Target ~8 Mbps with a 6-10 Mbps VBV window.
+    //
+    // - `-bufsize` is set to 2x maxrate for smooth rate control.
+    //
+    // - We don't supply a preset, it'll use the default ("medium").
+    const buildVideoCodecArgs = (encoder: VideoEncoder | undefined) => {
+        if (!reencodeVideo) return ["-c:v", "copy"];
+        const effectiveEncoder = encoder ?? softwareVideoEncoder;
+        return [
+            "-c:v",
+            effectiveEncoder,
+            "-b:v",
+            "8000k",
+            "-maxrate",
+            "10000k",
+            "-bufsize",
+            "20000k",
+        ];
+    };
+
+    const buildCommand = (encoder: VideoEncoder | undefined) =>
+        [
+            ffmpegBinaryPath(),
+            // Reduce the amount of output lines we have to parse.
+            ["-hide_banner"],
+            // Input file. We don't need any extra options that apply to the input file.
+            "-i",
+            inputFilePath,
+            // The remaining options apply to the next output file (`playlistPath`).
+            buildVideoFilterArgs(encoder),
+            buildVideoCodecArgs(encoder),
+            // Audio codec AAC
+            //
+            // - `-c:a aac` converts the audio stream to use the AAC codec
+            //
+            // - We don't supply a bitrate, it'll use the AAC default 128k bps.
+            ["-c:a", "aac"],
+            // Generate a HLS playlist.
+            ["-f", "hls"],
+            // Tell ffmpeg where to find the key, and the URI for the key to write
+            // into the generated playlist. Implies "-hls_enc 1".
+            ["-hls_key_info_file", keyInfoPath],
+            // Generate as many playlist entries as needed (default limit is 5).
+            ["-hls_list_size", "0"],
+            // Place all the video segments within the same .ts file (with the same
+            // path as the playlist file but with a ".ts" extension).
+            ["-hls_flags", "single_file"],
+            // Output path where the playlist should be generated.
+            playlistPath,
+        ].flat();
 
     let dimensions: { width: number; height: number };
     let videoSize: number;
@@ -538,13 +629,34 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
             fs.writeFile(keyInfoPath, keyInfo, { encoding: "utf8" }),
         ]);
 
-        // Tack on the redirection after constructing the command.
-        const commandWithRedirection = `${shellescape(command)} 2>${stderrPath}`;
+        const runHlsCommand = async (encoder: VideoEncoder | undefined) => {
+            // Tack on the redirection after constructing the command.
+            const commandWithRedirection = `${shellescape(buildCommand(encoder))} 2>${stderrPath}`;
 
-        // Run the ffmpeg command to generate the HLS playlist and segments.
-        //
-        // Note: Depending on the size of the input file, this may take long!
-        await execAsyncWorker(commandWithRedirection);
+            // Run the ffmpeg command to generate the HLS playlist and segments.
+            //
+            // Note: Depending on the size of the input file, this may take long!
+            await execAsyncWorker(commandWithRedirection);
+        };
+
+        if (reencodeVideo && preferredVideoEncoder === qsvVideoEncoder) {
+            try {
+                await runHlsCommand(preferredVideoEncoder);
+            } catch (e) {
+                log.warn(
+                    "HLS generation with h264_qsv failed, retrying with libx264",
+                    e,
+                );
+                await Promise.all([
+                    deletePathIgnoringErrors(playlistPath),
+                    deletePathIgnoringErrors(videoPath),
+                    deletePathIgnoringErrors(videoPath + ".tmp"),
+                ]);
+                await runHlsCommand(softwareVideoEncoder);
+            }
+        } else {
+            await runHlsCommand(preferredVideoEncoder);
+        }
 
         // While ffmpeg uses \n as the line separator in the generated playlist
         // file on Windows too, add an extra safety check that should fail the
@@ -635,10 +747,23 @@ const videoBitrateRegex = / ([1-9]\d*) kb\/s/;
  */
 const videoDimensionsRegex = / ([1-9]\d*)x([1-9]\d*)/;
 
+/**
+ * A regex that matches a "<digits>(.<digits>)? fps" value on the stream line.
+ */
+const videoFpsRegex = / ([0-9]+(?:\.[0-9]+)?) fps/;
+
+/**
+ * Fallback for FPS detection when "fps" is absent but "tbr" is present.
+ */
+const videoTbrRegex = / ([0-9]+(?:\.[0-9]+)?) tbr/;
+
 interface VideoCharacteristics {
     isH264: boolean;
     isHDR: boolean;
     bitrate: number | undefined;
+    width: number | undefined;
+    height: number | undefined;
+    fps: number | undefined;
 }
 
 /**
@@ -647,7 +772,7 @@ interface VideoCharacteristics {
  *
  * - If is encoded using H.264 codec.
  * - If it is HDR.
- * - Its bitrate.
+ * - Its bitrate, frame rate, and dimensions.
  *
  * The defaults are tailored for the cases in which these conditions are used,
  * so that even if we get the detection wrong we'll only end up encoding videos
@@ -683,6 +808,9 @@ const detectVideoCharacteristics = async (inputFilePath: string) => {
         isH264: false,
         isHDR: false,
         bitrate: undefined,
+        width: undefined,
+        height: undefined,
+        fps: undefined,
     };
     if (!videoStreamLine) return res;
 
@@ -701,6 +829,26 @@ const detectVideoCharacteristics = async (inputFilePath: string) => {
     if (brs) {
         const br = parseInt(brs, 10);
         if (br) res.bitrate = br * 1000;
+    }
+
+    const [, ws, hs] = videoDimensionsRegex.exec(videoStreamLine) ?? [];
+    if (ws && hs) {
+        const w = parseInt(ws, 10);
+        const h = parseInt(hs, 10);
+        if (w && h) {
+            res.width = w;
+            res.height = h;
+        }
+    }
+
+    const fpsMatch =
+        videoFpsRegex.exec(videoStreamLine) ??
+        videoTbrRegex.exec(videoStreamLine);
+    if (fpsMatch?.[1]) {
+        const parsedFps = parseFloat(fpsMatch[1]);
+        if (Number.isFinite(parsedFps) && parsedFps > 0) {
+            res.fps = parsedFps;
+        }
     }
 
     return res;

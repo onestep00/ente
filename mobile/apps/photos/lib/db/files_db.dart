@@ -1716,8 +1716,6 @@ class FilesDB with SqlDbBase {
       WHERE $columnFileType = ?
       AND ($columnUploadedFileID IS NOT NULL AND $columnUploadedFileID != -1)
       AND $columnOwnerID = ?
-      AND ($columnFileSize IS NOT NULL AND $columnFileSize <= 524288000)
-      AND ($columnDuration IS NOT NULL AND ($columnDuration <= 60 AND $columnDuration > 0))
     ''';
 
     final List<Object> queryArgs = [getInt(FileType.video), userID];
