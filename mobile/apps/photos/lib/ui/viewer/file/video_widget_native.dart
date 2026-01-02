@@ -899,13 +899,14 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
           child: Transform.scale(
             scale: _zoomScale,
             alignment: Alignment.center,
-            child: Center(
-              child: SizedBox(
-                width: targetWidth,
-                height: targetHeight,
-                child: NativeVideoPlayerView(
-                  onViewReady: _initializeController,
-                ),
+            child: OverflowBox(
+              alignment: Alignment.center,
+              minWidth: targetWidth,
+              maxWidth: targetWidth,
+              minHeight: targetHeight,
+              maxHeight: targetHeight,
+              child: NativeVideoPlayerView(
+                onViewReady: _initializeController,
               ),
             ),
           ),
