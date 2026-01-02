@@ -29,6 +29,7 @@ import "package:photos/ui/notification/toast.dart";
 import "package:photos/ui/viewer/file/native_video_player_controls/play_pause_button.dart";
 import "package:photos/ui/viewer/file/native_video_player_controls/seek_bar.dart";
 import "package:photos/ui/viewer/file/thumbnail_widget.dart";
+import "package:photos/ui/viewer/file/video_fit_mode.dart";
 import "package:photos/ui/viewer/file/video_stream_change.dart";
 import "package:photos/utils/dialog_util.dart";
 import "package:photos/utils/exif_util.dart";
@@ -98,6 +99,14 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
   double _scrubSecondsPerPixel = 0;
   int _scrubTargetMs = 0;
   int _scrubDurationMs = 0;
+  static const double _minZoomScale = 1.0;
+  static const double _maxZoomScale = 4.0;
+  final Map<int, Offset> _activePointers = {};
+  double _zoomScale = _minZoomScale;
+  double _pinchStartScale = _minZoomScale;
+  double _pinchStartDistance = 0;
+  bool _isPinching = false;
+  VideoFitMode? _fitModeOverride;
 
   @override
   void initState() {
@@ -264,6 +273,7 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
 
   @override
   Widget build(BuildContext context) {
+    final fitMode = _currentFitMode(context);
     return Hero(
       tag: widget.tagPrefix! + widget.file.tag,
       child: VisibilityDetector(
@@ -299,61 +309,63 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
                 : Stack(
                     key: const ValueKey("video_ready"),
                     children: [
-                      Center(
-                        child: AspectRatio(
-                          aspectRatio: aspectRatio ?? 1,
-                          child: NativeVideoPlayerView(
-                            onViewReady: _initializeController,
-                          ),
-                        ),
+                      Positioned.fill(
+                        child: _buildVideoViewport(fitMode),
                       ),
                       ValueListenableBuilder(
                         valueListenable: _showControls,
                         builder: (context, showControls, _) {
                           final enableScrub =
                               showControls && !widget.isFromMemories;
-                          return GestureDetector(
+                          return Listener(
                             behavior: HitTestBehavior.opaque,
-                            onTap: widget.isFromMemories
-                                ? null
-                                : () {
-                                    _showControls.value =
-                                        !_showControls.value;
-                                    if (widget.playbackCallback != null) {
-                                      widget.playbackCallback!(
-                                        !_showControls.value,
-                                        FullScreenRequestReason.userInteraction,
-                                      );
-                                    }
-                                  },
-                            onHorizontalDragStart:
-                                enableScrub ? _onScrubStart : null,
-                            onHorizontalDragUpdate:
-                                enableScrub ? _onScrubUpdate : null,
-                            onHorizontalDragEnd:
-                                enableScrub ? _onScrubEnd : null,
-                            onHorizontalDragCancel:
-                                enableScrub ? _onScrubCancel : null,
-                            onLongPress: () {
-                              if (widget.isFromMemories) {
-                                widget.playbackCallback?.call(
-                                  false,
-                                  FullScreenRequestReason.userInteraction,
-                                );
-                                _controller?.pause();
-                              }
-                            },
-                            onLongPressUp: () {
-                              if (widget.isFromMemories) {
-                                widget.playbackCallback?.call(
-                                  true,
-                                  FullScreenRequestReason.userInteraction,
-                                );
-                                _controller?.play();
-                              }
-                            },
-                            child: Container(
-                              constraints: const BoxConstraints.expand(),
+                            onPointerDown: _handlePointerDown,
+                            onPointerMove: _handlePointerMove,
+                            onPointerUp: _handlePointerEnd,
+                            onPointerCancel: _handlePointerEnd,
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTap: widget.isFromMemories
+                                  ? null
+                                  : () {
+                                      _showControls.value =
+                                          !_showControls.value;
+                                      if (widget.playbackCallback != null) {
+                                        widget.playbackCallback!(
+                                          !_showControls.value,
+                                          FullScreenRequestReason.userInteraction,
+                                        );
+                                      }
+                                    },
+                              onHorizontalDragStart:
+                                  enableScrub ? _onScrubStart : null,
+                              onHorizontalDragUpdate:
+                                  enableScrub ? _onScrubUpdate : null,
+                              onHorizontalDragEnd:
+                                  enableScrub ? _onScrubEnd : null,
+                              onHorizontalDragCancel:
+                                  enableScrub ? _onScrubCancel : null,
+                              onLongPress: () {
+                                if (widget.isFromMemories) {
+                                  widget.playbackCallback?.call(
+                                    false,
+                                    FullScreenRequestReason.userInteraction,
+                                  );
+                                  _controller?.pause();
+                                }
+                              },
+                              onLongPressUp: () {
+                                if (widget.isFromMemories) {
+                                  widget.playbackCallback?.call(
+                                    true,
+                                    FullScreenRequestReason.userInteraction,
+                                  );
+                                  _controller?.play();
+                                }
+                              },
+                              child: Container(
+                                constraints: const BoxConstraints.expand(),
+                              ),
                             ),
                           );
                         },
@@ -439,6 +451,9 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
                                                   file: widget.file,
                                                   scrubPositionNotifier:
                                                       _scrubProgressNotifier,
+                                                  fitMode: fitMode,
+                                                  onToggleFitMode: () =>
+                                                      _toggleFitMode(fitMode),
                                                 )
                                               : const SizedBox();
                                         },
@@ -549,7 +564,89 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
     return secondsPerPixel;
   }
 
+  VideoFitMode _currentFitMode(BuildContext context) {
+    final override = _fitModeOverride;
+    if (override != null) return override;
+    final ratio = aspectRatio;
+    final viewport = MediaQuery.sizeOf(context);
+    if (ratio == null ||
+        ratio <= 0 ||
+        viewport.width <= 0 ||
+        viewport.height <= 0) {
+      return VideoFitMode.fitWidth;
+    }
+    return autoVideoFitMode(
+      videoAspectRatio: ratio,
+      viewportAspectRatio: viewport.width / viewport.height,
+    );
+  }
+
+  void _toggleFitMode(VideoFitMode currentMode) {
+    setState(() {
+      _fitModeOverride = nextVideoFitMode(currentMode);
+      _resetZoom();
+    });
+  }
+
+  void _resetZoom() {
+    _zoomScale = _minZoomScale;
+    _pinchStartScale = _minZoomScale;
+    _pinchStartDistance = 0;
+    _isPinching = false;
+    _activePointers.clear();
+  }
+
+  void _handlePointerDown(PointerDownEvent event) {
+    _activePointers[event.pointer] = event.position;
+    if (_activePointers.length == 2) {
+      if (_isScrubbing) {
+        _onScrubCancel();
+      }
+      _isPinching = true;
+      _pinchStartDistance = _pointerDistance();
+      _pinchStartScale = _zoomScale;
+      _debouncer.cancelDebounceTimer();
+      _showControls.value = true;
+    }
+  }
+
+  void _handlePointerMove(PointerMoveEvent event) {
+    if (!_activePointers.containsKey(event.pointer)) return;
+    _activePointers[event.pointer] = event.position;
+    if (!_isPinching || _activePointers.length < 2) return;
+    if (_pinchStartDistance <= 0) return;
+    final distance = _pointerDistance();
+    if (distance <= 0) return;
+    final scale = distance / _pinchStartDistance;
+    final nextScale =
+        (_pinchStartScale * scale).clamp(_minZoomScale, _maxZoomScale);
+    if (nextScale == _zoomScale) return;
+    setState(() {
+      _zoomScale = nextScale;
+    });
+  }
+
+  void _handlePointerEnd(PointerEvent event) {
+    _activePointers.remove(event.pointer);
+    if (_activePointers.length < 2) {
+      _isPinching = false;
+      _pinchStartDistance = 0;
+      if (_zoomScale <= _minZoomScale + 0.01 && _zoomScale != _minZoomScale) {
+        setState(() {
+          _zoomScale = _minZoomScale;
+        });
+      }
+    }
+  }
+
+  double _pointerDistance() {
+    if (_activePointers.length < 2) return 0;
+    final points = _activePointers.values.take(2).toList();
+    return (points[0] - points[1]).distance;
+  }
+
   void _onScrubStart(DragStartDetails _) {
+    if (_isPinching) return;
     if (_controller == null) return;
     final durationMs = _videoDurationMs();
     if (durationMs == null || durationMs <= 0) return;
@@ -568,6 +665,7 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
   }
 
   void _onScrubUpdate(DragUpdateDetails details) {
+    if (_isPinching) return;
     if (!_isScrubbing || _scrubDurationMs <= 0) return;
     if (_scrubSecondsPerPixel == 0) return;
     final deltaSeconds = details.delta.dx * _scrubSecondsPerPixel;
@@ -578,6 +676,7 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
   }
 
   void _onScrubEnd(DragEndDetails _) {
+    if (_isPinching) return;
     if (!_isScrubbing) return;
     _isScrubbing = false;
     _seekToScrubTarget();
@@ -764,6 +863,57 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
     }
   }
 
+  Widget _buildVideoViewport(VideoFitMode fitMode) {
+    final videoAspectRatio =
+        aspectRatio != null && aspectRatio! > 0 ? aspectRatio! : 1.0;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final maxWidth = constraints.maxWidth;
+        final maxHeight = constraints.maxHeight;
+        if (maxWidth <= 0 || maxHeight <= 0) {
+          return const SizedBox.shrink();
+        }
+        double targetWidth;
+        double targetHeight;
+        switch (fitMode) {
+          case VideoFitMode.fitWidth:
+            targetWidth = maxWidth;
+            targetHeight = maxWidth / videoAspectRatio;
+            break;
+          case VideoFitMode.fitHeight:
+            targetHeight = maxHeight;
+            targetWidth = maxHeight * videoAspectRatio;
+            break;
+          case VideoFitMode.full:
+            final containerAspect = maxWidth / maxHeight;
+            if (videoAspectRatio >= containerAspect) {
+              targetHeight = maxHeight;
+              targetWidth = maxHeight * videoAspectRatio;
+            } else {
+              targetWidth = maxWidth;
+              targetHeight = maxWidth / videoAspectRatio;
+            }
+            break;
+        }
+        return ClipRect(
+          child: Transform.scale(
+            scale: _zoomScale,
+            alignment: Alignment.center,
+            child: Center(
+              child: SizedBox(
+                width: targetWidth,
+                height: targetHeight,
+                child: NativeVideoPlayerView(
+                  onViewReady: _initializeController,
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Widget _getLoadingWidget() {
     return Stack(
       key: const ValueKey("video_loading"),
@@ -898,6 +1048,8 @@ class _SeekBarAndDuration extends StatelessWidget {
   final int position;
   final EnteFile file;
   final ValueNotifier<double?>? scrubPositionNotifier;
+  final VideoFitMode fitMode;
+  final VoidCallback onToggleFitMode;
 
   const _SeekBarAndDuration({
     required this.controller,
@@ -907,6 +1059,8 @@ class _SeekBarAndDuration extends StatelessWidget {
     required this.position,
     required this.file,
     this.scrubPositionNotifier,
+    required this.fitMode,
+    required this.onToggleFitMode,
   });
 
   @override
@@ -997,6 +1151,12 @@ class _SeekBarAndDuration extends StatelessWidget {
                           style: getEnteTextTheme(context).mini.copyWith(
                                 color: textBaseDark,
                               ),
+                        ),
+                        const SizedBox(width: 4),
+                        VideoFitModeButton(
+                          mode: fitMode,
+                          onPressed: onToggleFitMode,
+                          color: textBaseDark,
                         ),
                       ],
                     ),

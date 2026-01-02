@@ -18,6 +18,7 @@ import "package:photos/core/configuration.dart";
 import "package:photos/core/event_bus.dart";
 import "package:photos/db/files_db.dart";
 import "package:photos/db/upload_locks_db.dart";
+import "package:photos/events/device_charging_changed_event.dart";
 import "package:photos/events/device_health_changed_event.dart";
 import "package:photos/events/sync_status_update_event.dart";
 import "package:photos/events/video_preview_state_changed_event.dart";
@@ -50,6 +51,9 @@ class VideoPreviewService {
   LinkedHashMap<int, EnteFile> fileQueue = LinkedHashMap();
   final int _maxPreviewSizeLimitForCache = 50 * 1024 * 1024; // 50 MB
   Set<int>? _failureFiles;
+  int _streamSessionTotal = 0;
+  List<String> _currentEncodingSummaryLines = [];
+  int? _currentEncodingFileId;
 
   bool get _hasQueuedFile => fileQueue.isNotEmpty;
 
@@ -61,9 +65,22 @@ class VideoPreviewService {
         cacheManager = DefaultCacheManager(),
         videoCacheManager = VideoCacheManager.instance,
         config = Configuration.instance {
+    _registerChargingListeners();
     if (flagService.stopStreamProcess) {
       _registerStopSafelyListeners();
     }
+  }
+
+  void _registerChargingListeners() {
+    Bus.instance.on<DeviceChargingChangedEvent>().listen((event) {
+      if (event.isCharging) {
+        if (isVideoStreamingEnabled) {
+          queueFiles(duration: Duration.zero);
+        }
+      } else {
+        stop("device not charging");
+      }
+    });
   }
 
   void _registerStopSafelyListeners() {
@@ -135,6 +152,9 @@ class VideoPreviewService {
     }
     fileQueue.clear();
     _items.clear();
+    _streamSessionTotal = 0;
+    _currentEncodingSummaryLines = [];
+    _currentEncodingFileId = null;
   }
 
   /// Stop streaming immediately, cancels FFmpeg and network requests.
@@ -231,6 +251,11 @@ class VideoPreviewService {
         PreviewItemStatus.inQueue,
       );
       fileQueue[file.uploadedFileID!] = file;
+      if (_streamSessionTotal == 0) {
+        _streamSessionTotal = fileQueue.length + 1;
+      } else {
+        _streamSessionTotal += 1;
+      }
     }
 
     return true;
@@ -350,6 +375,103 @@ class VideoPreviewService {
     } catch (e, s) {
       _logger.severe('Error getting Streaming status', e, s);
       rethrow;
+    }
+  }
+
+  ({int total, int current, int remaining}) getQueueProgress() {
+    final bool hasCurrent =
+        uploadingFileId >= 0 && _items.containsKey(uploadingFileId);
+    final int remaining = fileQueue.length + (hasCurrent ? 1 : 0);
+    var total = _streamSessionTotal > 0 ? _streamSessionTotal : remaining;
+    if (total < remaining) {
+      total = remaining;
+    }
+    final int current = hasCurrent ? (total - fileQueue.length) : 0;
+    return (total: total, current: current, remaining: remaining);
+  }
+
+  List<String> getCurrentEncodingSummary() {
+    if (_currentEncodingSummaryLines.isEmpty) return const [];
+    if (_currentEncodingFileId != null &&
+        _currentEncodingFileId != uploadingFileId) {
+      return const [];
+    }
+    return List.unmodifiable(_currentEncodingSummaryLines);
+  }
+
+  String _formatEncoderLabel(String encoder) {
+    if (encoder == "copy") return "copy (no re-encode)";
+    final normalized = encoder.toLowerCase();
+    final isHardware = normalized.contains("vaapi") ||
+        normalized.contains("videotoolbox") ||
+        normalized.contains("mediacodec") ||
+        normalized.contains("nvenc");
+    return isHardware ? "$encoder (hardware)" : "$encoder (software)";
+  }
+
+  void _updateEncodingSummary({
+    required int fileId,
+    required String? sourceCodec,
+    required bool reencodeVideo,
+    required bool rescaleVideo,
+    required bool applyFps,
+    required bool needsTonemap,
+    required int maxTargetDimension,
+    required int maxTargetFps,
+  }) {
+    final normalizedSource =
+        sourceCodec?.isNotEmpty ?? false ? sourceCodec!.toUpperCase() : "UNKNOWN";
+    final outputCodec = reencodeVideo ? "H.264" : normalizedSource;
+    final encoder = reencodeVideo ? "libx264" : "copy";
+    final processParts = <String>[];
+    if (reencodeVideo) {
+      processParts.add("re-encode");
+      if (rescaleVideo || needsTonemap) {
+        processParts.add("scale<=${maxTargetDimension}p");
+      }
+      if (applyFps) {
+        processParts.add("fps<=$maxTargetFps");
+      }
+      if (needsTonemap) {
+        processParts.add("HDR tonemap");
+      }
+    } else {
+      processParts.add("stream copy");
+    }
+
+    _currentEncodingFileId = fileId;
+    _currentEncodingSummaryLines = [
+      "Video: $outputCodec",
+      "Encoder: ${_formatEncoderLabel(encoder)}",
+      "Audio: AAC 128k",
+      "Processing: ${processParts.join(', ')}",
+      "Output: HLS single-file",
+    ];
+  }
+
+  Future<void> runBackgroundStreaming({
+    Duration maxDuration = const Duration(minutes: 15),
+  }) async {
+    if (!isVideoStreamingEnabled) return;
+    if (!computeController.isDeviceCharging) return;
+
+    final isAllowed = _allowManualStream();
+    if (!isAllowed) return;
+
+    await _ensurePreviewIdsInitialized();
+    final result = await _putFilesForPreviewCreation();
+    if (!result) {
+      computeController.releaseCompute(stream: true);
+      return;
+    }
+
+    final deadline = DateTime.now().add(maxDuration);
+    while (_items.isNotEmpty && DateTime.now().isBefore(deadline)) {
+      await Future.delayed(const Duration(seconds: 2));
+    }
+
+    if (_items.isNotEmpty) {
+      stop("background time limit");
     }
   }
 
@@ -517,6 +639,16 @@ class VideoPreviewService {
       final needsTonemap = isHDR;
       final applyFPS =
           (double.tryParse(props?.fps ?? "") ?? 100) > maxTargetFps;
+      _updateEncodingSummary(
+        fileId: enteFile.uploadedFileID!,
+        sourceCodec: codec,
+        reencodeVideo: reencodeVideo,
+        rescaleVideo: rescaleVideo,
+        applyFps: applyFPS,
+        needsTonemap: needsTonemap,
+        maxTargetDimension: maxTargetDimension,
+        maxTargetFps: maxTargetFps,
+      );
 
       String filters = "";
 
@@ -1252,7 +1384,9 @@ class VideoPreviewService {
     }
 
     final totalFiles = fileQueue.length;
+    _streamSessionTotal = totalFiles;
     if (totalFiles == 0) {
+      _streamSessionTotal = 0;
       _logger.fine("[init] No preview to cache");
       return false;
     }
@@ -1271,11 +1405,13 @@ class VideoPreviewService {
 
   bool _allowStream() {
     return isVideoStreamingEnabled &&
+        computeController.isDeviceCharging &&
         computeController.requestCompute(stream: true);
   }
 
   bool _allowManualStream() {
     return isVideoStreamingEnabled &&
+        computeController.isDeviceCharging &&
         computeController.requestCompute(
           stream: true,
           bypassInteractionCheck: true,
@@ -1286,6 +1422,7 @@ class VideoPreviewService {
   /// To check if it's enabled, device is healthy and running streaming
   bool _isPermissionGranted() {
     return isVideoStreamingEnabled &&
+        computeController.isDeviceCharging &&
         computeController.computeState == ComputeRunState.generatingStream &&
         computeController.isDeviceHealthy;
   }

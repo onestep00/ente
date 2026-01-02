@@ -3,10 +3,12 @@ import "dart:async";
 import "package:flutter/gestures.dart";
 import "package:flutter/material.dart";
 import "package:photos/core/event_bus.dart";
+import "package:photos/events/device_charging_changed_event.dart";
 import "package:photos/events/video_preview_state_changed_event.dart";
 import "package:photos/generated/l10n.dart";
 import "package:photos/l10n/l10n.dart";
 import "package:photos/models/preview/preview_item_status.dart";
+import "package:photos/service_locator.dart";
 import "package:photos/services/video_preview_service.dart";
 import "package:photos/theme/ente_theme.dart";
 import "package:photos/ui/common/loading_widget.dart";
@@ -240,39 +242,66 @@ class VideoStreamingStatusWidgetState
     extends State<VideoStreamingStatusWidget> {
   double? _netProcessed;
   StreamSubscription? _subscription;
+  StreamSubscription? _chargingSubscription;
+  int _queueTotal = 0;
+  int _queueCurrent = 0;
+  bool _isCharging = computeController.isDeviceCharging;
+  List<String> _encodingSummary = const [];
 
   @override
   void initState() {
     super.initState();
+    _isCharging = computeController.isDeviceCharging;
     init();
     _subscription =
         Bus.instance.on<VideoPreviewStateChangedEvent>().listen((event) {
       final status = event.status;
+      _refreshQueueStatus();
 
-      // Handle different states
-      switch (status) {
-        case PreviewItemStatus.uploaded:
-          init();
-          break;
-        default:
+      if (status == PreviewItemStatus.uploaded) {
+        init();
       }
+    });
+    _chargingSubscription =
+        Bus.instance.on<DeviceChargingChangedEvent>().listen((event) {
+      _refreshQueueStatus();
     });
   }
 
   Future<void> init() async {
-    _netProcessed = await VideoPreviewService.instance.getStatus();
-    setState(() {});
+    final netProcessed = await VideoPreviewService.instance.getStatus();
+    if (!mounted) return;
+    setState(() {
+      _netProcessed = netProcessed;
+      _syncQueueStatus();
+    });
+  }
+
+  void _syncQueueStatus() {
+    final queueProgress = VideoPreviewService.instance.getQueueProgress();
+    _queueTotal = queueProgress.total;
+    _queueCurrent = queueProgress.current;
+    _encodingSummary = VideoPreviewService.instance.getCurrentEncodingSummary();
+    _isCharging = computeController.isDeviceCharging;
+  }
+
+  void _refreshQueueStatus() {
+    if (!mounted) return;
+    setState(_syncQueueStatus);
   }
 
   @override
   void dispose() {
     _subscription?.cancel();
+    _chargingSubscription?.cancel();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = getEnteColorScheme(context);
+    final bool hasQueue = _queueTotal > 0;
+    final bool hasEncodingSummary = _encodingSummary.isNotEmpty;
     return Column(
       children: [
         if (_netProcessed != null)
@@ -295,6 +324,35 @@ class VideoStreamingStatusWidgetState
                 key: ValueKey("processed_items_" + _netProcessed.toString()),
                 menuItemColor: colorScheme.fillFaint,
               ),
+              if (hasQueue) ...[
+                const SizedBox(height: 8),
+                MenuItemWidget(
+                  captionedTextWidget: CaptionedTextWidget(
+                    title: AppLocalizations.of(context).processingVideos,
+                    subTitle: !_isCharging ? "Charging required" : null,
+                  ),
+                  trailingWidget: Text(
+                    _queueCurrent > 0 && _isCharging
+                        ? '$_queueCurrent/$_queueTotal'
+                        : AppLocalizations.of(context).queued,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  singleBorderRadius: 8,
+                  alignCaptionedTextToLeft: true,
+                  isGestureDetectorDisabled: true,
+                  menuItemColor: colorScheme.fillFaint,
+                ),
+              ],
+              if (hasEncodingSummary) ...[
+                const SizedBox(height: 8),
+                MenuItemWidget(
+                  captionedTextWidget: _buildEncodingSummary(context),
+                  singleBorderRadius: 8,
+                  alignCaptionedTextToLeft: true,
+                  isGestureDetectorDisabled: true,
+                  menuItemColor: colorScheme.fillFaint,
+                ),
+              ],
               const SizedBox(height: 12),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 8.0),
@@ -310,6 +368,35 @@ class VideoStreamingStatusWidgetState
         else
           const EnteLoadingWidget(),
       ],
+    );
+  }
+
+  Widget _buildEncodingSummary(BuildContext context) {
+    final textTheme = getEnteTextTheme(context);
+    final mutedColor = getEnteColorScheme(context).textMuted;
+    return Flexible(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 2),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              AppLocalizations.of(context).streamDetails,
+              style: textTheme.body,
+            ),
+            const SizedBox(height: 6),
+            ..._encodingSummary.map(
+              (line) => Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text(
+                  line,
+                  style: textTheme.mini.copyWith(color: mutedColor),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
