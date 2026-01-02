@@ -24,7 +24,7 @@ BoxFit videoFitModeToBoxFit(VideoFitMode mode) {
     case VideoFitMode.fitHeight:
       return BoxFit.fitHeight;
     case VideoFitMode.full:
-      return BoxFit.cover;
+      return BoxFit.contain;
   }
 }
 

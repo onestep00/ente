@@ -740,6 +740,7 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
   }
 
   void _onPlaybackStatusChanged() {
+    _updateAspectRatioFromController();
     if (widget.isFromMemories) return;
     final duration = widget.file.duration != null
         ? widget.file.duration! * 1000
@@ -779,6 +780,21 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
     _handleWakeLockOnPlaybackChanges();
   }
 
+  void _updateAspectRatioFromController() {
+    final info = _controller?.videoInfo;
+    if (info == null || info.width == 0 || info.height == 0) {
+      return;
+    }
+    final ratio = info.width / info.height;
+    if (ratio <= 0) return;
+    if (aspectRatio == null || (aspectRatio! - ratio).abs() > 0.001) {
+      aspectRatio = ratio;
+      if (mounted) {
+        setState(() {});
+      }
+    }
+  }
+
   void _onError(String errorMessage) {
     //This doesn't work all the time
     _logger.severe(
@@ -791,6 +807,7 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
   Future<void> _onPlaybackReady() async {
     if (_isPlaybackReady.value) return;
     await _controller!.play();
+    _updateAspectRatioFromController();
     final durationInSeconds = durationToSeconds(duration) ?? 10;
     widget.onFinalFileLoad?.call(memoryDuration: durationInSeconds);
     unawaited(_controller!.setVolume(1));
@@ -887,11 +904,11 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
           case VideoFitMode.full:
             final containerAspect = maxWidth / maxHeight;
             if (videoAspectRatio >= containerAspect) {
-              targetHeight = maxHeight;
-              targetWidth = maxHeight * videoAspectRatio;
-            } else {
               targetWidth = maxWidth;
               targetHeight = maxWidth / videoAspectRatio;
+            } else {
+              targetHeight = maxHeight;
+              targetWidth = maxHeight * videoAspectRatio;
             }
             break;
         }
