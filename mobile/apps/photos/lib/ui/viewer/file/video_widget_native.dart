@@ -83,12 +83,21 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
   final _debouncer = Debouncer(
     const Duration(milliseconds: 2000),
   );
+  final _scrubDebouncer = Debouncer(
+    const Duration(milliseconds: 50),
+    executionInterval: const Duration(milliseconds: 50),
+  );
+  final _scrubProgressNotifier = ValueNotifier<double?>(null);
   StreamSubscription<PlaybackEvent>? _subscription;
   StreamSubscription<StreamSwitchedEvent>? _streamSwitchedSubscription;
   StreamSubscription<DownloadTask>? downloadTaskSubscription;
   late final StreamSubscription<FileCaptionUpdatedEvent>
       _captionUpdatedSubscription;
   int position = 0;
+  bool _isScrubbing = false;
+  double _scrubSecondsPerPixel = 0;
+  int _scrubTargetMs = 0;
+  int _scrubDurationMs = 0;
 
   @override
   void initState() {
@@ -245,6 +254,8 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
     _isSeeking.removeListener(_seekListener);
     _isSeeking.dispose();
     _debouncer.cancelDebounceTimer();
+    _scrubDebouncer.cancelDebounceTimer();
+    _scrubProgressNotifier.dispose();
     _captionUpdatedSubscription.cancel();
     EnteWakeLockService.instance
         .updateWakeLock(enable: false, wakeLockFor: WakeLockFor.videoPlayback);
@@ -296,40 +307,56 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
                           ),
                         ),
                       ),
-                      GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: widget.isFromMemories
-                            ? null
-                            : () {
-                                _showControls.value = !_showControls.value;
-                                if (widget.playbackCallback != null) {
-                                  widget.playbackCallback!(
-                                    !_showControls.value,
-                                    FullScreenRequestReason.userInteraction,
-                                  );
-                                }
-                              },
-                        onLongPress: () {
-                          if (widget.isFromMemories) {
-                            widget.playbackCallback?.call(
-                              false,
-                              FullScreenRequestReason.userInteraction,
-                            );
-                            _controller?.pause();
-                          }
+                      ValueListenableBuilder(
+                        valueListenable: _showControls,
+                        builder: (context, showControls, _) {
+                          final enableScrub =
+                              showControls && !widget.isFromMemories;
+                          return GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: widget.isFromMemories
+                                ? null
+                                : () {
+                                    _showControls.value =
+                                        !_showControls.value;
+                                    if (widget.playbackCallback != null) {
+                                      widget.playbackCallback!(
+                                        !_showControls.value,
+                                        FullScreenRequestReason.userInteraction,
+                                      );
+                                    }
+                                  },
+                            onHorizontalDragStart:
+                                enableScrub ? _onScrubStart : null,
+                            onHorizontalDragUpdate:
+                                enableScrub ? _onScrubUpdate : null,
+                            onHorizontalDragEnd:
+                                enableScrub ? _onScrubEnd : null,
+                            onHorizontalDragCancel:
+                                enableScrub ? _onScrubCancel : null,
+                            onLongPress: () {
+                              if (widget.isFromMemories) {
+                                widget.playbackCallback?.call(
+                                  false,
+                                  FullScreenRequestReason.userInteraction,
+                                );
+                                _controller?.pause();
+                              }
+                            },
+                            onLongPressUp: () {
+                              if (widget.isFromMemories) {
+                                widget.playbackCallback?.call(
+                                  true,
+                                  FullScreenRequestReason.userInteraction,
+                                );
+                                _controller?.play();
+                              }
+                            },
+                            child: Container(
+                              constraints: const BoxConstraints.expand(),
+                            ),
+                          );
                         },
-                        onLongPressUp: () {
-                          if (widget.isFromMemories) {
-                            widget.playbackCallback?.call(
-                              true,
-                              FullScreenRequestReason.userInteraction,
-                            );
-                            _controller?.play();
-                          }
-                        },
-                        child: Container(
-                          constraints: const BoxConstraints.expand(),
-                        ),
                       ),
                       widget.isFromMemories
                           ? const SizedBox.shrink()
@@ -363,6 +390,7 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
                                 ),
                               ),
                             ),
+                      _buildScrubOverlay(),
                       widget.isFromMemories
                           ? const SizedBox.shrink()
                           : Positioned(
@@ -409,6 +437,8 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
                                                   isSeeking: _isSeeking,
                                                   position: position,
                                                   file: widget.file,
+                                                  scrubPositionNotifier:
+                                                      _scrubProgressNotifier,
                                                 )
                                               : const SizedBox();
                                         },
@@ -456,6 +486,9 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
         _onPlaybackReady();
         break;
       case PlaybackPositionChangedEvent():
+        if (_isScrubbing || _isSeeking.value) {
+          break;
+        }
         position = event.positionInMilliseconds;
         if (mounted) {
           setState(() {});
@@ -491,6 +524,120 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
         }
       });
     }
+  }
+
+  int? _videoDurationMs() {
+    final fileDuration = widget.file.duration;
+    if (fileDuration != null && fileDuration > 0) {
+      return fileDuration * 1000;
+    }
+    final controllerDuration = _controller?.videoInfo?.durationInMilliseconds;
+    if (controllerDuration != null && controllerDuration > 0) {
+      return controllerDuration;
+    }
+    return null;
+  }
+
+  double _secondsPerPixel(int durationMs) {
+    final width = MediaQuery.sizeOf(context).width;
+    if (width <= 0) return 0;
+    final secondsPerPixel = durationMs / 1000 / width;
+    const minSecondsPerPixel = 0.05;
+    const maxSecondsPerPixel = 2.0;
+    if (secondsPerPixel < minSecondsPerPixel) return minSecondsPerPixel;
+    if (secondsPerPixel > maxSecondsPerPixel) return maxSecondsPerPixel;
+    return secondsPerPixel;
+  }
+
+  void _onScrubStart(DragStartDetails _) {
+    if (_controller == null) return;
+    final durationMs = _videoDurationMs();
+    if (durationMs == null || durationMs <= 0) return;
+    _scrubDurationMs = durationMs;
+    _scrubSecondsPerPixel = _secondsPerPixel(durationMs);
+    _scrubTargetMs = _controller!.playbackPosition.inMilliseconds;
+    _scrubTargetMs = _scrubTargetMs.clamp(0, _scrubDurationMs) as int;
+    _isScrubbing = true;
+    _isSeeking.value = true;
+    _showControls.value = true;
+    _scrubProgressNotifier.value = _scrubTargetMs / _scrubDurationMs;
+    position = _scrubTargetMs;
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _onScrubUpdate(DragUpdateDetails details) {
+    if (!_isScrubbing || _scrubDurationMs <= 0) return;
+    if (_scrubSecondsPerPixel == 0) return;
+    final deltaSeconds = details.delta.dx * _scrubSecondsPerPixel;
+    if (deltaSeconds == 0) return;
+    _scrubTargetMs += (deltaSeconds * 1000).round();
+    _scrubTargetMs = _scrubTargetMs.clamp(0, _scrubDurationMs) as int;
+    _seekToScrubTarget();
+  }
+
+  void _onScrubEnd(DragEndDetails _) {
+    if (!_isScrubbing) return;
+    _isScrubbing = false;
+    _seekToScrubTarget();
+    _isSeeking.value = false;
+    _scrubProgressNotifier.value = null;
+  }
+
+  void _onScrubCancel() {
+    _isScrubbing = false;
+    _isSeeking.value = false;
+    _scrubProgressNotifier.value = null;
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _seekToScrubTarget() {
+    position = _scrubTargetMs;
+    if (mounted) {
+      setState(() {});
+    }
+    if (_scrubDurationMs > 0) {
+      _scrubProgressNotifier.value = _scrubTargetMs / _scrubDurationMs;
+    }
+    _scrubDebouncer.run(() async {
+      await _controller?.seekTo(Duration(milliseconds: _scrubTargetMs));
+    });
+  }
+
+  Widget _buildScrubOverlay() {
+    if (!_isScrubbing) {
+      return const SizedBox.shrink();
+    }
+    final scrubSeconds = (_scrubTargetMs / 1000).floor();
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: Center(
+          child: Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: 16,
+              vertical: 8,
+            ),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.6),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: strokeFaintDark,
+                width: 1,
+              ),
+            ),
+            child: Text(
+              secondsToDuration(scrubSeconds),
+              style: getEnteTextTheme(context).h3Bold.copyWith(
+                    color: textBaseDark,
+                  ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   void _onPlaybackStatusChanged() {
@@ -750,6 +897,7 @@ class _SeekBarAndDuration extends StatelessWidget {
   final ValueNotifier<bool> isSeeking;
   final int position;
   final EnteFile file;
+  final ValueNotifier<double?>? scrubPositionNotifier;
 
   const _SeekBarAndDuration({
     required this.controller,
@@ -758,6 +906,7 @@ class _SeekBarAndDuration extends StatelessWidget {
     required this.isSeeking,
     required this.position,
     required this.file,
+    this.scrubPositionNotifier,
   });
 
   @override
@@ -840,6 +989,7 @@ class _SeekBarAndDuration extends StatelessWidget {
                             controller!,
                             durationToSeconds(duration),
                             isSeeking,
+                            scrubPositionNotifier: scrubPositionNotifier,
                           ),
                         ),
                         Text(

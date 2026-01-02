@@ -42,7 +42,16 @@ class _VideoWidgetState extends State<VideoWidget> {
     const Duration(milliseconds: 2000),
   );
   final _isSeekingNotifier = ValueNotifier<bool>(false);
+  final _scrubProgressNotifier = ValueNotifier<double?>(null);
+  final _scrubDebouncer = Debouncer(
+    const Duration(milliseconds: 50),
+    executionInterval: const Duration(milliseconds: 50),
+  );
   late final StreamSubscription<bool> _isPlayingStreamSubscription;
+  bool _isScrubbing = false;
+  double _scrubSecondsPerPixel = 0;
+  int _scrubTargetMs = 0;
+  int _scrubDurationMs = 0;
 
   @override
   void initState() {
@@ -70,6 +79,8 @@ class _VideoWidgetState extends State<VideoWidget> {
     _hideControlsDebouncer.cancelDebounceTimer();
     _isSeekingNotifier.removeListener(isSeekingListener);
     _isSeekingNotifier.dispose();
+    _scrubProgressNotifier.dispose();
+    _scrubDebouncer.cancelDebounceTimer();
     super.dispose();
   }
 
@@ -87,6 +98,114 @@ class _VideoWidgetState extends State<VideoWidget> {
         });
       }
     }
+  }
+
+  int? _videoDurationMs() {
+    final controllerDuration =
+        widget.controller.player.state.duration.inMilliseconds;
+    if (controllerDuration > 0) return controllerDuration;
+    final fileDuration = widget.file.duration;
+    if (fileDuration != null && fileDuration > 0) {
+      return fileDuration * 1000;
+    }
+    return null;
+  }
+
+  double _secondsPerPixel(int durationMs) {
+    final width = MediaQuery.sizeOf(context).width;
+    if (width <= 0) return 0;
+    final secondsPerPixel = durationMs / 1000 / width;
+    const minSecondsPerPixel = 0.05;
+    const maxSecondsPerPixel = 2.0;
+    if (secondsPerPixel < minSecondsPerPixel) return minSecondsPerPixel;
+    if (secondsPerPixel > maxSecondsPerPixel) return maxSecondsPerPixel;
+    return secondsPerPixel;
+  }
+
+  void _onScrubStart(DragStartDetails _) {
+    final durationMs = _videoDurationMs();
+    if (durationMs == null || durationMs <= 0) return;
+    _scrubDurationMs = durationMs;
+    _scrubSecondsPerPixel = _secondsPerPixel(durationMs);
+    _scrubTargetMs =
+        widget.controller.player.state.position.inMilliseconds;
+    _scrubTargetMs = _scrubTargetMs.clamp(0, _scrubDurationMs) as int;
+    _isScrubbing = true;
+    _isSeekingNotifier.value = true;
+    showControlsNotifier.value = true;
+    _scrubProgressNotifier.value = _scrubTargetMs / _scrubDurationMs;
+  }
+
+  void _onScrubUpdate(DragUpdateDetails details) {
+    if (!_isScrubbing || _scrubDurationMs <= 0) return;
+    if (_scrubSecondsPerPixel == 0) return;
+    final deltaSeconds = details.delta.dx * _scrubSecondsPerPixel;
+    if (deltaSeconds == 0) return;
+    _scrubTargetMs += (deltaSeconds * 1000).round();
+    _scrubTargetMs = _scrubTargetMs.clamp(0, _scrubDurationMs) as int;
+    _seekToScrubTarget();
+  }
+
+  void _onScrubEnd(DragEndDetails _) {
+    if (!_isScrubbing) return;
+    _isScrubbing = false;
+    _seekToScrubTarget();
+    _scrubProgressNotifier.value = null;
+    _isSeekingNotifier.value = false;
+  }
+
+  void _onScrubCancel() {
+    _isScrubbing = false;
+    _scrubProgressNotifier.value = null;
+    _isSeekingNotifier.value = false;
+  }
+
+  void _seekToScrubTarget() {
+    if (_scrubDurationMs <= 0) return;
+    _scrubProgressNotifier.value = _scrubTargetMs / _scrubDurationMs;
+    _scrubDebouncer.run(() async {
+      await widget.controller.player.seek(
+        Duration(milliseconds: _scrubTargetMs),
+      );
+    });
+  }
+
+  Widget _buildScrubOverlay() {
+    return ValueListenableBuilder<double?>(
+      valueListenable: _scrubProgressNotifier,
+      builder: (context, scrubValue, _) {
+        if (scrubValue == null) {
+          return const SizedBox.shrink();
+        }
+        final scrubSeconds = (_scrubTargetMs / 1000).floor();
+        return Positioned.fill(
+          child: IgnorePointer(
+            child: Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 8,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.6),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: strokeFaintDark,
+                    width: 1,
+                  ),
+                ),
+                child: Text(
+                  secondsToDuration(scrubSeconds),
+                  style: getEnteTextTheme(context).h3Bold.copyWith(
+                        color: textBaseDark,
+                      ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
   }
 
   @override
@@ -118,6 +237,18 @@ class _VideoWidgetState extends State<VideoWidget> {
                               );
                             }
                           },
+                    onHorizontalDragStart: value && !widget.isFromMemories
+                        ? _onScrubStart
+                        : null,
+                    onHorizontalDragUpdate: value && !widget.isFromMemories
+                        ? _onScrubUpdate
+                        : null,
+                    onHorizontalDragEnd: value && !widget.isFromMemories
+                        ? _onScrubEnd
+                        : null,
+                    onHorizontalDragCancel: value && !widget.isFromMemories
+                        ? _onScrubCancel
+                        : null,
                     onLongPress: () {
                       if (widget.isFromMemories) {
                         widget.playbackCallback?.call(
@@ -150,6 +281,7 @@ class _VideoWidgetState extends State<VideoWidget> {
                           ignoring: !value,
                           child: PlayPauseButtonMediaKit(widget.controller),
                         ),
+                  _buildScrubOverlay(),
                   widget.isFromMemories
                       ? const SizedBox.shrink()
                       : Positioned(
@@ -179,6 +311,8 @@ class _VideoWidgetState extends State<VideoWidget> {
                                       controller: widget.controller,
                                       isSeekingNotifier: _isSeekingNotifier,
                                       file: widget.file,
+                                      scrubPositionNotifier:
+                                          _scrubProgressNotifier,
                                     ),
                                   ],
                                 ),
@@ -291,12 +425,14 @@ class SeekBarAndDuration extends StatelessWidget {
   final VideoController? controller;
   final ValueNotifier<bool> isSeekingNotifier;
   final EnteFile file;
+  final ValueNotifier<double?>? scrubPositionNotifier;
 
   const SeekBarAndDuration({
     super.key,
     required this.controller,
     required this.isSeekingNotifier,
     required this.file,
+    this.scrubPositionNotifier,
   });
 
   @override
@@ -376,6 +512,7 @@ class SeekBarAndDuration extends StatelessWidget {
                   child: SeekBar(
                     controller!,
                     isSeekingNotifier,
+                    scrubPositionNotifier: scrubPositionNotifier,
                   ),
                 ),
                 Text(
@@ -413,10 +550,12 @@ class SeekBarAndDuration extends StatelessWidget {
 class SeekBar extends StatefulWidget {
   final VideoController controller;
   final ValueNotifier<bool> isSeekingNotifier;
+  final ValueNotifier<double?>? scrubPositionNotifier;
   const SeekBar(
     this.controller,
     this.isSeekingNotifier, {
     super.key,
+    this.scrubPositionNotifier,
   });
 
   @override
@@ -426,6 +565,7 @@ class SeekBar extends StatefulWidget {
 class _SeekBarState extends State<SeekBar> {
   double _sliderValue = 0.0;
   late final StreamSubscription<Duration> _positionStreamSubscription;
+  VoidCallback? _scrubListener;
   final _debouncer = Debouncer(
     const Duration(milliseconds: 300),
     executionInterval: const Duration(milliseconds: 300),
@@ -447,11 +587,29 @@ class _SeekBarState extends State<SeekBar> {
         });
       }
     });
+    if (widget.scrubPositionNotifier != null) {
+      _scrubListener = () {
+        final value = widget.scrubPositionNotifier!.value;
+        if (value == null) return;
+        if (mounted) {
+          setState(() {
+            _sliderValue = value.clamp(0, 1);
+            if (_sliderValue.isNaN) {
+              _sliderValue = 0.0;
+            }
+          });
+        }
+      };
+      widget.scrubPositionNotifier!.addListener(_scrubListener!);
+    }
   }
 
   @override
   void dispose() {
     _positionStreamSubscription.cancel();
+    if (_scrubListener != null) {
+      widget.scrubPositionNotifier?.removeListener(_scrubListener!);
+    }
     _debouncer.cancelDebounceTimer();
     super.dispose();
   }
