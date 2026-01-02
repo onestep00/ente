@@ -30,9 +30,12 @@ const outputPathPlaceholder = "OUTPUT";
 const ffmpegPathOverrideEnvVar = "ENTE_FFMPEG_PATH";
 const ffmpegVideoEncoderOverrideEnvVar = "ENTE_FFMPEG_VIDEO_ENCODER";
 const qsvVideoEncoder = "h264_qsv";
+const vaapiVideoEncoder = "h264_vaapi";
 const softwareVideoEncoder = "libx264";
+const vaapiDeviceEnvVar = "ENTE_FFMPEG_VAAPI_DEVICE";
+const defaultVaapiDevice = "/dev/dri/renderD128";
 
-type VideoEncoder = "h264_qsv" | "libx264";
+type VideoEncoder = "h264_qsv" | "h264_vaapi" | "libx264";
 
 let cachedAvailableEncoders: Set<string> | undefined;
 let cachedPreferredVideoEncoder: VideoEncoder | undefined;
@@ -219,14 +222,16 @@ const resolvePreferredVideoEncoder = async (): Promise<VideoEncoder> => {
     const encoders = await ffmpegEncoders();
     const override = process.env[ffmpegVideoEncoderOverrideEnvVar]?.trim();
     if (override) {
-        if (override === qsvVideoEncoder) {
-            if (encoders.has(qsvVideoEncoder)) {
-                cachedPreferredVideoEncoder = qsvVideoEncoder;
+        if (override === qsvVideoEncoder || override === vaapiVideoEncoder) {
+            if (encoders.has(override)) {
+                cachedPreferredVideoEncoder = override;
                 return cachedPreferredVideoEncoder;
             }
             log.warn(
-                `Requested ${qsvVideoEncoder} via ${ffmpegVideoEncoderOverrideEnvVar}, but encoder is unavailable`,
+                `Requested ${override} via ${ffmpegVideoEncoderOverrideEnvVar}, but encoder is unavailable; falling back to ${softwareVideoEncoder}`,
             );
+            cachedPreferredVideoEncoder = softwareVideoEncoder;
+            return cachedPreferredVideoEncoder;
         } else if (override === softwareVideoEncoder) {
             cachedPreferredVideoEncoder = softwareVideoEncoder;
             return cachedPreferredVideoEncoder;
@@ -238,8 +243,21 @@ const resolvePreferredVideoEncoder = async (): Promise<VideoEncoder> => {
     }
     cachedPreferredVideoEncoder = encoders.has(qsvVideoEncoder)
         ? qsvVideoEncoder
-        : softwareVideoEncoder;
+        : encoders.has(vaapiVideoEncoder)
+          ? vaapiVideoEncoder
+          : softwareVideoEncoder;
     return cachedPreferredVideoEncoder;
+};
+
+const resolveFallbackVideoEncoder = async (
+    preferred: VideoEncoder,
+): Promise<VideoEncoder | undefined> => {
+    if (preferred === softwareVideoEncoder) return undefined;
+    const encoders = await ffmpegEncoders();
+    if (preferred === qsvVideoEncoder && encoders.has(vaapiVideoEncoder)) {
+        return vaapiVideoEncoder;
+    }
+    return softwareVideoEncoder;
 };
 
 /**
@@ -284,7 +302,7 @@ export interface FFmpegGenerateHLSPlaylistAndSegmentsResult {
  * Overview of the cases:
  *
  *     H.264, <= 10 MB              - Skip
- *     Prefer h264_qsv when available, fallback to libx264
+ *     Prefer h264_qsv when available, then h264_vaapi, fallback to libx264
  *     Target up to 1080p, <=60 fps, ~6-10 Mbps
  *     HDR                          - Apply tonemap (zscale+tonemap+zscale)
  *
@@ -293,7 +311,8 @@ export interface FFmpegGenerateHLSPlaylistAndSegmentsResult {
  *     ffmpeg -i in.mov -vf "scale='if(lt(iw,ih),min(1080,iw),-2)':'if(lt(iw,ih),-2,min(1080,ih))',fps=60,zscale=transfer=linear,tonemap=tonemap=hable:desat=0,zscale=primaries=709:transfer=709:matrix=709,format=yuv420p" -c:v libx264 -c:a aac -f hls -hls_key_info_file out.m3u8.info -hls_list_size 0 -hls_flags single_file out.m3u8
  * Targets up to 1080p, clamps to 60 fps, and uses ~8 Mbps with a 10 Mbps max
  * rate.
- * When h264_qsv is available, we switch the encoder and use format=nv12.
+ * When h264_qsv or h264_vaapi is available, we switch the encoder and use
+ * format=nv12 (plus hwupload for VAAPI).
  *
  * See: [Note: Preview variant of videos]
  *
@@ -544,10 +563,14 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
                 "zscale=primaries=709:transfer=709:matrix=709",
             );
         }
-        const pixelFormat =
-            encoder === qsvVideoEncoder ? "nv12" : "yuv420p";
+        const isHardwareEncoder =
+            encoder === qsvVideoEncoder || encoder === vaapiVideoEncoder;
+        const pixelFormat = isHardwareEncoder ? "nv12" : "yuv420p";
         // Output using a format suitable for the selected encoder.
         videoFilters.push(`format=${pixelFormat}`);
+        if (encoder === vaapiVideoEncoder) {
+            videoFilters.push("hwupload");
+        }
         return videoFilters;
     };
 
@@ -587,11 +610,19 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
         ];
     };
 
+    const buildHardwareDeviceArgs = (encoder: VideoEncoder | undefined) => {
+        if (encoder !== vaapiVideoEncoder) return [];
+        const device =
+            process.env[vaapiDeviceEnvVar]?.trim() ?? defaultVaapiDevice;
+        return ["-vaapi_device", device];
+    };
+
     const buildCommand = (encoder: VideoEncoder | undefined) =>
         [
             ffmpegBinaryPath(),
             // Reduce the amount of output lines we have to parse.
             ["-hide_banner"],
+            buildHardwareDeviceArgs(encoder),
             // Input file. We don't need any extra options that apply to the input file.
             "-i",
             inputFilePath,
@@ -639,12 +670,15 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
             await execAsyncWorker(commandWithRedirection);
         };
 
-        if (reencodeVideo && preferredVideoEncoder === qsvVideoEncoder) {
+        if (reencodeVideo && preferredVideoEncoder) {
             try {
                 await runHlsCommand(preferredVideoEncoder);
             } catch (e) {
+                const fallbackEncoder =
+                    await resolveFallbackVideoEncoder(preferredVideoEncoder);
+                if (!fallbackEncoder) throw e;
                 log.warn(
-                    "HLS generation with h264_qsv failed, retrying with libx264",
+                    `HLS generation with ${preferredVideoEncoder} failed, retrying with ${fallbackEncoder}`,
                     e,
                 );
                 await Promise.all([
@@ -652,7 +686,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
                     deletePathIgnoringErrors(videoPath),
                     deletePathIgnoringErrors(videoPath + ".tmp"),
                 ]);
-                await runHlsCommand(softwareVideoEncoder);
+                await runHlsCommand(fallbackEncoder);
             }
         } else {
             await runHlsCommand(preferredVideoEncoder);
