@@ -151,7 +151,7 @@ lib/
 ## Key Dependencies
 
 - **Flutter 3.32.8** with Dart SDK >=3.3.0 <4.0.0
-- **Media**: `photo_manager`, `video_editor`, `ffmpeg_kit_flutter`
+- **Media**: `photo_manager`, `video_editor`, `ffmpeg_kit_flutter_new`
 - **Storage**: `sqlite_async`, `flutter_secure_storage`
 - **ML/AI**: Custom ONNX runtime, `ml_linalg`
 - **Rust**: Flutter Rust Bridge for performance

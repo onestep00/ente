@@ -3,12 +3,10 @@ import "dart:async";
 import "package:flutter/gestures.dart";
 import "package:flutter/material.dart";
 import "package:photos/core/event_bus.dart";
-import "package:photos/events/device_charging_changed_event.dart";
 import "package:photos/events/video_preview_state_changed_event.dart";
 import "package:photos/generated/l10n.dart";
 import "package:photos/l10n/l10n.dart";
 import "package:photos/models/preview/preview_item_status.dart";
-import "package:photos/service_locator.dart";
 import "package:photos/services/video_preview_service.dart";
 import "package:photos/theme/ente_theme.dart";
 import "package:photos/ui/common/loading_widget.dart";
@@ -242,16 +240,15 @@ class VideoStreamingStatusWidgetState
     extends State<VideoStreamingStatusWidget> {
   double? _netProcessed;
   StreamSubscription? _subscription;
-  StreamSubscription? _chargingSubscription;
+  Timer? _progressTimer;
   int _queueTotal = 0;
   int _queueCurrent = 0;
-  bool _isCharging = computeController.isDeviceCharging;
   List<String> _encodingSummary = const [];
+  double? _encodingProgress;
 
   @override
   void initState() {
     super.initState();
-    _isCharging = computeController.isDeviceCharging;
     init();
     _subscription =
         Bus.instance.on<VideoPreviewStateChangedEvent>().listen((event) {
@@ -262,9 +259,9 @@ class VideoStreamingStatusWidgetState
         init();
       }
     });
-    _chargingSubscription =
-        Bus.instance.on<DeviceChargingChangedEvent>().listen((event) {
-      _refreshQueueStatus();
+    unawaited(_updateEncodingProgress());
+    _progressTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      unawaited(_updateEncodingProgress());
     });
   }
 
@@ -282,7 +279,9 @@ class VideoStreamingStatusWidgetState
     _queueTotal = queueProgress.total;
     _queueCurrent = queueProgress.current;
     _encodingSummary = VideoPreviewService.instance.getCurrentEncodingSummary();
-    _isCharging = computeController.isDeviceCharging;
+    if (_encodingSummary.isEmpty) {
+      _encodingProgress = null;
+    }
   }
 
   void _refreshQueueStatus() {
@@ -293,7 +292,7 @@ class VideoStreamingStatusWidgetState
   @override
   void dispose() {
     _subscription?.cancel();
-    _chargingSubscription?.cancel();
+    _progressTimer?.cancel();
     super.dispose();
   }
 
@@ -329,10 +328,9 @@ class VideoStreamingStatusWidgetState
                 MenuItemWidget(
                   captionedTextWidget: CaptionedTextWidget(
                     title: AppLocalizations.of(context).processingVideos,
-                    subTitle: !_isCharging ? "Charging required" : null,
                   ),
                   trailingWidget: Text(
-                    _queueCurrent > 0 && _isCharging
+                    _queueCurrent > 0
                         ? '$_queueCurrent/$_queueTotal'
                         : AppLocalizations.of(context).queued,
                     style: Theme.of(context).textTheme.bodySmall,
@@ -374,6 +372,10 @@ class VideoStreamingStatusWidgetState
   Widget _buildEncodingSummary(BuildContext context) {
     final textTheme = getEnteTextTheme(context);
     final mutedColor = getEnteColorScheme(context).textMuted;
+    final progressValue = _encodingProgress;
+    final progressLine = progressValue == null
+        ? null
+        : "${AppLocalizations.of(context).processing}: ${(progressValue * 100).toStringAsFixed(0)}%";
     return Flexible(
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 2),
@@ -385,6 +387,14 @@ class VideoStreamingStatusWidgetState
               style: textTheme.body,
             ),
             const SizedBox(height: 6),
+            if (progressLine != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text(
+                  progressLine,
+                  style: textTheme.mini.copyWith(color: mutedColor),
+                ),
+              ),
             ..._encodingSummary.map(
               (line) => Padding(
                 padding: const EdgeInsets.only(bottom: 4),
@@ -398,5 +408,27 @@ class VideoStreamingStatusWidgetState
         ),
       ),
     );
+  }
+
+  Future<void> _updateEncodingProgress() async {
+    final progress =
+        await VideoPreviewService.instance.getCurrentEncodingProgress();
+    if (!mounted) return;
+
+    final summary = VideoPreviewService.instance.getCurrentEncodingSummary();
+    final clamped =
+        progress == null ? null : progress.clamp(0.0, 1.0) as double;
+    final summaryChanged = summary.join("\n") != _encodingSummary.join("\n");
+    final progressChanged = switch ((clamped, _encodingProgress)) {
+      (null, null) => false,
+      (null, _) => true,
+      (_, null) => true,
+      _ => (clamped! - _encodingProgress!).abs() >= 0.01,
+    };
+    if (!summaryChanged && !progressChanged) return;
+    setState(() {
+      _encodingSummary = summary;
+      _encodingProgress = clamped;
+    });
   }
 }

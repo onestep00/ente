@@ -2,14 +2,12 @@ import "dart:async";
 import "dart:io";
 
 import "package:battery_info/battery_info_plugin.dart";
-import "package:battery_info/enums/charging_status.dart";
 import "package:battery_info/model/android_battery_info.dart";
 import "package:battery_info/model/iso_battery_info.dart";
 import "package:flutter/foundation.dart";
 import "package:logging/logging.dart";
 import "package:photos/core/event_bus.dart";
 import "package:photos/events/compute_control_event.dart";
-import "package:photos/events/device_charging_changed_event.dart";
 import "package:photos/events/device_health_changed_event.dart";
 import "package:thermal/thermal.dart";
 
@@ -35,7 +33,6 @@ class ComputeController {
   bool _isDeviceHealthy = true;
   bool _isUserInteracting = true;
   bool _canRunCompute = false;
-  bool _isCharging = false;
 
   /// If true, user interaction is ignored and compute tasks can run regardless of user activity.
   bool interactionOverride = false;
@@ -50,7 +47,6 @@ class ComputeController {
   bool _waitingToRunML = false;
 
   bool get isDeviceHealthy => _isDeviceHealthy;
-  bool get isDeviceCharging => _isCharging;
 
   void _setDeviceHealth(bool healthy) {
     if (_isDeviceHealthy == healthy) return;
@@ -243,7 +239,6 @@ class ComputeController {
   void _onAndroidBatteryStateUpdate(AndroidBatteryInfo? batteryInfo) {
     _androidLastBatteryInfo = batteryInfo;
     _logger.info("Battery info: ${batteryInfo!.toJson()}");
-    _setChargingStatus(batteryInfo.chargingStatus);
     _setDeviceHealth(_computeIsAndroidDeviceHealthy());
     _fireControlEvent();
   }
@@ -251,7 +246,6 @@ class ComputeController {
   void _oniOSBatteryStateUpdate(IosBatteryInfo? batteryInfo) {
     _iosLastBatteryInfo = batteryInfo;
     _logger.info("Battery info: ${batteryInfo!.toJson()}");
-    _setChargingStatus(batteryInfo.chargingStatus);
     _setDeviceHealth(_computeIsiOSDeviceHealthy());
     _fireControlEvent();
   }
@@ -281,16 +275,6 @@ class ComputeController {
           _iosLastBatteryInfo?.batteryLevel ?? kMinimumBatteryLevel,
         ) &&
         _isAcceptableThermalState();
-  }
-
-  void _setChargingStatus(ChargingStatus? status) {
-    final bool isCharging = switch (status) {
-      ChargingStatus.Charging || ChargingStatus.Full => true,
-      _ => false,
-    };
-    if (_isCharging == isCharging) return;
-    _isCharging = isCharging;
-    Bus.instance.fire(DeviceChargingChangedEvent(isCharging));
   }
 
   bool _isAcceptableThermalState() {
