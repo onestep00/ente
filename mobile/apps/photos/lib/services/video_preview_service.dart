@@ -49,11 +49,10 @@ class VideoPreviewService {
   final LinkedHashMap<int, PreviewItem> _items = LinkedHashMap();
   LinkedHashMap<int, EnteFile> fileQueue = LinkedHashMap();
   final int _maxPreviewSizeLimitForCache = 50 * 1024 * 1024; // 50 MB
+  static const int _targetBitrateKbps = 8000;
   static const int _maxTargetBitrateKbps = 10000;
   static const int _maxTargetBufferKbps = 20000;
-  static const int _hardwareMaxTargetBitrateKbps = 12000;
-  static const int _hardwareMaxTargetBufferKbps = 24000;
-  static const int _baseCrf = 20;
+  static const int _hardwareMaxTargetBitrateKbps = 10000;
   static const int _maxTargetFps = 60;
   static const int _maxTargetDimension = 1080;
   static const int _hlsSegmentDurationSeconds = 2;
@@ -415,7 +414,10 @@ class VideoPreviewService {
   }
 
   List<String> _preferredHardwareEncoders() {
-    if (Platform.isAndroid) return const ["h264_mediacodec"];
+    if (Platform.isAndroid) {
+      // MediaCodec H.264 output can break HLS seek on Android; use software.
+      return const [];
+    }
     if (Platform.isIOS) return const ["h264_videotoolbox"];
     if (Platform.isWindows) {
       return const ["h264_nvenc", "h264_qsv", "h264_amf"];
@@ -424,33 +426,24 @@ class VideoPreviewService {
   }
 
   String _buildSoftwareVideoArgs({
+    required int targetBitrateKbps,
     required int maxTargetBitrateKbps,
     required int maxTargetBufferKbps,
-    required int crf,
     required String keyframeArgs,
   }) {
-    return "-c:v libx264 -preset veryfast -crf $crf -tune fastdecode "
+    return "-c:v libx264 -b:v ${targetBitrateKbps}k "
         "-maxrate ${maxTargetBitrateKbps}k -bufsize ${maxTargetBufferKbps}k "
-        "-profile:v high -level 4.2 $keyframeArgs";
+        "$keyframeArgs";
   }
 
   String _buildHardwareVideoArgs({
     required String encoder,
+    required int targetBitrateKbps,
     required int maxTargetBitrateKbps,
     required int maxTargetBufferKbps,
     required String keyframeArgs,
   }) {
-    if (encoder == "h264_videotoolbox") {
-      return "-c:v $encoder -b:v ${maxTargetBitrateKbps}k "
-          "-maxrate ${maxTargetBitrateKbps}k "
-          "-bufsize ${maxTargetBufferKbps}k -profile:v high -level 4.2 $keyframeArgs";
-    }
-    if (encoder == "h264_mediacodec") {
-      return "-c:v $encoder -b:v ${maxTargetBitrateKbps}k "
-          "-maxrate ${maxTargetBitrateKbps}k "
-          "-bufsize ${maxTargetBufferKbps}k $keyframeArgs";
-    }
-    return "-c:v $encoder -b:v ${maxTargetBitrateKbps}k "
+    return "-c:v $encoder -b:v ${targetBitrateKbps}k "
         "-maxrate ${maxTargetBitrateKbps}k "
         "-bufsize ${maxTargetBufferKbps}k $keyframeArgs";
   }
@@ -888,23 +881,11 @@ class VideoPreviewService {
           needsTonemap;
       final rescaleVideo = needsScale;
 
-      final int cappedSoftwareMaxBitrateKbps = _capMaxBitrateForSource(
-        baseMaxKbps: _maxTargetBitrateKbps,
-        sourceBitrateKbps: sourceBitrateKbps,
-        headroom: _bitrateCapHeadroom,
-      );
-      final int cappedSoftwareBufferKbps = _capMaxBufferForBitrate(
+      final int targetBitrateKbps = _targetBitrateKbps;
+      final int maxTargetBitrateKbps = _maxTargetBitrateKbps;
+      final int maxTargetBufferKbps = _capMaxBufferForBitrate(
         baseBufferKbps: _maxTargetBufferKbps,
-        maxBitrateKbps: cappedSoftwareMaxBitrateKbps,
-      );
-      final int cappedHardwareMaxBitrateKbps = _capMaxBitrateForSource(
-        baseMaxKbps: _hardwareMaxTargetBitrateKbps,
-        sourceBitrateKbps: sourceBitrateKbps,
-        headroom: _bitrateCapHeadroom,
-      );
-      final int cappedHardwareBufferKbps = _capMaxBufferForBitrate(
-        baseBufferKbps: _hardwareMaxTargetBufferKbps,
-        maxBitrateKbps: cappedHardwareMaxBitrateKbps,
+        maxBitrateKbps: maxTargetBitrateKbps,
       );
 
       String filters = "";
@@ -940,7 +921,7 @@ class VideoPreviewService {
 
       final audioArgs = '-c:a aac -b:a 128k ';
       final hlsArgs = '-f hls -hls_time $_hlsSegmentDurationSeconds '
-          '-hls_flags single_file+independent_segments '
+          '-hls_flags single_file '
           '-hls_list_size 0 -hls_key_info_file ${keyinfo.path} ';
       String? fallbackCommand;
       String videoArgs = '-c:v copy ';
@@ -948,9 +929,9 @@ class VideoPreviewService {
       List<String> hardwareEncodersToTry = const [];
       if (reencodeVideo) {
         final softwareVideoArgs = _buildSoftwareVideoArgs(
-          maxTargetBitrateKbps: cappedSoftwareMaxBitrateKbps,
-          maxTargetBufferKbps: cappedSoftwareBufferKbps,
-          crf: _baseCrf,
+          targetBitrateKbps: targetBitrateKbps,
+          maxTargetBitrateKbps: maxTargetBitrateKbps,
+          maxTargetBufferKbps: maxTargetBufferKbps,
           keyframeArgs: softwareKeyframeArgs,
         );
         if (hardwareEncoders.isNotEmpty) {
@@ -958,8 +939,9 @@ class VideoPreviewService {
           encoderLabel = hardwareEncodersToTry.first;
           videoArgs = _buildHardwareVideoArgs(
             encoder: encoderLabel,
-            maxTargetBitrateKbps: cappedHardwareMaxBitrateKbps,
-            maxTargetBufferKbps: cappedHardwareBufferKbps,
+            targetBitrateKbps: targetBitrateKbps,
+            maxTargetBitrateKbps: maxTargetBitrateKbps,
+            maxTargetBufferKbps: maxTargetBufferKbps,
             keyframeArgs: hardwareKeyframeArgs,
           );
           fallbackCommand = '$filters$softwareVideoArgs$audioArgs$hlsArgs';
@@ -1023,8 +1005,9 @@ class VideoPreviewService {
           encoderLabel = encoder;
           final retryVideoArgs = _buildHardwareVideoArgs(
             encoder: encoderLabel,
-            maxTargetBitrateKbps: cappedHardwareMaxBitrateKbps,
-            maxTargetBufferKbps: cappedHardwareBufferKbps,
+            targetBitrateKbps: targetBitrateKbps,
+            maxTargetBitrateKbps: maxTargetBitrateKbps,
+            maxTargetBufferKbps: maxTargetBufferKbps,
             keyframeArgs: hardwareKeyframeArgs,
           );
           _updateEncodingSummary(
