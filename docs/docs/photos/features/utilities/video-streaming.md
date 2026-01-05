@@ -21,8 +21,8 @@ When you enable video streaming, Ente generates streamable versions (HLS format)
 
 Streams are encrypted HLS files with a `.m3u8` playlist. Currently, Ente converts videos to:
 
-- Resolution: 720p
-- Bitrate: 2mbps
+- Resolution: Up to 1080p (keeps lower resolutions as-is)
+- Bitrate: Targeted around 5-12 Mbps, depending on the source (higher caps on devices using hardware encoding)
 - Format: H.264
 
 The generated stream is a single encrypted blob (AES encryption) while the playlist file (`.m3u8`) is separately encrypted using XChaCha20. Ente cannot read the contents, duration, or number of chunks within the generated stream due to encryption.

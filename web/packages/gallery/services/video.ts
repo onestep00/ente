@@ -22,6 +22,7 @@ import { wait } from "ente-utils/promise";
 import { z } from "zod";
 import {
     initiateGenerateHLS,
+    readGenerateHLSProgress,
     readVideoStream,
     videoStreamDone,
     type GenerateHLSResult,
@@ -44,7 +45,13 @@ export type HLSGenerationEnabledStatus = "processing" | "idle";
 
 export type HLSGenerationStatus =
     | { enabled: false }
-    | { enabled: true; status?: HLSGenerationEnabledStatus };
+    | {
+          enabled: true;
+          status?: HLSGenerationEnabledStatus;
+          processedCount?: number;
+          totalCount?: number;
+          currentProgress?: number;
+      };
 
 interface VideoProcessingQueueItem {
     /**
@@ -61,10 +68,20 @@ interface VideoProcessingQueueItem {
      * us to directly read the file off the user's file system.
      */
     timestampedUploadItem?: TimestampedFileSystemUploadItem;
+    /**
+     * If `true`, recreate the stream even if one already exists.
+     */
+    forceRecreate?: boolean;
 }
 
 const idleWaitInitial = 10 * 1000; /* 10 sec */
 const idleWaitMax = idleWaitInitial * 2 ** 6; /* 640 sec */
+const hlsTargetMinBitrate = 6000 * 1000;
+const hlsTargetMaxBitrate = 10000 * 1000;
+const recreateStreamMinRatio = 0.5;
+const recreateSourceMinRatio = 0.8;
+const bitrateCapHeadroom = 1.3;
+const progressPollIntervalMs = 2000;
 
 /**
  * Internal in-memory state shared by the functions in this module.
@@ -91,6 +108,14 @@ class VideoState {
      * {@link hlsGenerationStatusSnapshot}.
      */
     lastEnabledStatus: HLSGenerationEnabledStatus | undefined;
+    /** Number of items processed in the current batch. */
+    processingDone: number | undefined;
+    /** Total items in the current batch (processed + remaining). */
+    processingTotal: number | undefined;
+    /** File ID currently being encoded. */
+    currentFileID: number | undefined;
+    /** Current encode progress [0,1] for the active file. */
+    currentProgress: number | undefined;
     /**
      * Queue of recently uploaded items waiting to be processed.
      */
@@ -181,6 +206,44 @@ const setHLSGenerationStatusSnapshot = (snapshot: HLSGenerationStatus) => {
     _state.hlsGenerationStatusListeners.forEach((l) => l());
 };
 
+const emitStatusSnapshot = () => {
+    const enabled = _state.isHLSGenerationEnabled;
+    if (!enabled) {
+        setHLSGenerationStatusSnapshot({ enabled: false });
+        return;
+    }
+
+    const status = _state.lastEnabledStatus;
+    const snapshot: HLSGenerationStatus = { enabled: true };
+    if (status) snapshot.status = status;
+    if (status == "processing") {
+        if (_state.processingDone !== undefined) {
+            snapshot.processedCount = _state.processingDone;
+        }
+        if (_state.processingTotal !== undefined) {
+            snapshot.totalCount = _state.processingTotal;
+        }
+        if (_state.currentProgress !== undefined) {
+            snapshot.currentProgress = _state.currentProgress;
+        }
+    }
+
+    setHLSGenerationStatusSnapshot(snapshot);
+};
+
+const emitProcessingSnapshot = () => {
+    if (!_state.isHLSGenerationEnabled) return;
+    if (_state.lastEnabledStatus != "processing") return;
+    emitStatusSnapshot();
+};
+
+const resetProcessingStats = () => {
+    _state.processingDone = undefined;
+    _state.processingTotal = undefined;
+    _state.currentFileID = undefined;
+    _state.currentProgress = undefined;
+};
+
 /**
  * A variant of {@link setHLSGenerationStatusSnapshot} that only triggers an
  * update of the snapshot if the enabled state is different from the last known
@@ -189,10 +252,10 @@ const setHLSGenerationStatusSnapshot = (snapshot: HLSGenerationStatus) => {
 const updateSnapshotIfNeeded = (
     status: HLSGenerationEnabledStatus | undefined,
 ) => {
-    const enabled = _state.isHLSGenerationEnabled;
-    if (enabled && status != _state.lastEnabledStatus) {
+    if (!_state.isHLSGenerationEnabled) return;
+    if (status != _state.lastEnabledStatus) {
         _state.lastEnabledStatus = status;
-        setHLSGenerationStatusSnapshot({ enabled, status });
+        emitStatusSnapshot();
     }
 };
 
@@ -214,7 +277,9 @@ export const initVideoProcessing = async () => {
 
     // Update snapshot to reflect the enabled setting. The status will get
     // filled in when we tick.
-    setHLSGenerationStatusSnapshot({ enabled });
+    _state.lastEnabledStatus = undefined;
+    resetProcessingStats();
+    emitStatusSnapshot();
 };
 
 /**
@@ -247,6 +312,7 @@ export const toggleHLSGeneration = async () => {
 
     // Clear transient fields.
     _state.lastEnabledStatus = undefined;
+    resetProcessingStats();
 
     // Update disk.
     await saveGenerateHLS(enabled);
@@ -255,7 +321,7 @@ export const toggleHLSGeneration = async () => {
 
     // Update snapshot. Right now we only set the enabled setting. The status
     // will get filled in when we tick.
-    setHLSGenerationStatusSnapshot({ enabled });
+    emitStatusSnapshot();
 
     // Wake up the processor if needed.
     if (enabled) tickNow();
@@ -683,6 +749,46 @@ export const videoProcessingSyncIfNeeded = async () => {
     tickNow(); /* if not already ticking */
 };
 
+const enqueueVideoProcessingItems = (items: VideoProcessingQueueItem[]) => {
+    if (items.length === 0) return;
+
+    const queuedByID = new Map<number, VideoProcessingQueueItem>();
+    for (const queued of _state.liveQueue) {
+        queuedByID.set(queued.file.id, queued);
+    }
+
+    let addedCount = 0;
+    let updatedExisting = false;
+    for (const item of items) {
+        const existing = queuedByID.get(item.file.id);
+        if (existing) {
+            if (item.forceRecreate && !existing.forceRecreate) {
+                existing.forceRecreate = true;
+                updatedExisting = true;
+            }
+            if (!existing.timestampedUploadItem && item.timestampedUploadItem) {
+                existing.timestampedUploadItem = item.timestampedUploadItem;
+                updatedExisting = true;
+            }
+            continue;
+        }
+        _state.liveQueue.push(item);
+        queuedByID.set(item.file.id, item);
+        addedCount += 1;
+    }
+
+    if (addedCount === 0 && !updatedExisting) return;
+
+    if (_state.lastEnabledStatus == "processing" && addedCount > 0) {
+        _state.processingDone ??= 0;
+        _state.processingTotal =
+            (_state.processingTotal ?? _state.processingDone) + addedCount;
+        emitProcessingSnapshot();
+    }
+
+    tickNow();
+};
+
 /**
  * Create a streamable HLS playlist for a video uploaded from this client.
  *
@@ -723,14 +829,32 @@ export const processVideoNewUpload = (
         return;
     }
 
-    // Enqueue the item.
-    _state.liveQueue.push({
-        file,
-        timestampedUploadItem: processableUploadItem,
-    });
+    enqueueVideoProcessingItems([
+        {
+            file,
+            timestampedUploadItem: processableUploadItem,
+        },
+    ]);
+};
 
-    // Interrupt any idle timeouts if any, go go.
-    tickNow();
+export const recreateVideoStreams = (files: EnteFile[]) => {
+    if (!isHLSGenerationSupported) return;
+    if (!isHLSGenerationEnabled()) return;
+    if (files.length === 0) return;
+
+    const userID = ensureLocalUser().id;
+    const videoFiles = uniqueFilesByID(files).filter(
+        (file) =>
+            file.metadata.fileType == FileType.video && file.ownerID == userID,
+    );
+    if (videoFiles.length === 0) return;
+
+    enqueueVideoProcessingItems(
+        videoFiles.map((file) => ({
+            file,
+            forceRecreate: true,
+        })),
+    );
 };
 
 /**
@@ -823,7 +947,16 @@ const processQueue = async () => {
             if (bq?.length) item = bq.pop();
         }
         if (item && !transientFailedFileIDs.has(item.file.id)) {
+            const remainingIncludingCurrent =
+                _state.liveQueue.length + (bq?.length ?? 0) + 1;
+            _state.processingDone ??= 0;
+            _state.processingTotal =
+                _state.processingDone + remainingIncludingCurrent;
+            _state.currentFileID = item.file.id;
+            _state.currentProgress = undefined;
+
             updateSnapshotIfNeeded("processing");
+            emitProcessingSnapshot();
 
             try {
                 await processQueueItem(item);
@@ -834,11 +967,19 @@ const processQueue = async () => {
                 // This will get retried again at some point later.
                 log.error(`Failed to process video ${fileLogID(item.file)}`, e);
                 transientFailedFileIDs.add(item.file.id);
+            } finally {
+                const remaining = _state.liveQueue.length + (bq?.length ?? 0);
+                _state.processingDone = (_state.processingDone ?? 0) + 1;
+                _state.processingTotal = _state.processingDone + remaining;
+                _state.currentFileID = undefined;
+                _state.currentProgress = undefined;
+                emitProcessingSnapshot();
             }
         } else {
             // There are no more items in either the live queue or backlog.
             // Go to sleep (for increasingly longer durations, capped at a
             // maximum).
+            resetProcessingStats();
             updateSnapshotIfNeeded("idle");
 
             const idleWait = _state.idleWait;
@@ -854,9 +995,87 @@ const processQueue = async () => {
         }
     }
 
+    resetProcessingStats();
     updateSnapshotIfNeeded(undefined);
 
     _state.queueProcessor = undefined;
+};
+
+const calculateBitrate = (sizeBytes: number, durationSeconds: number) => {
+    if (!sizeBytes || !durationSeconds) return undefined;
+    if (durationSeconds <= 0) return undefined;
+    return (sizeBytes * 8) / durationSeconds;
+};
+
+const shouldRecreateLowQualityStream = async (
+    file: EnteFile,
+    playlistFileData: EncryptedBlob,
+) => {
+    const durationSeconds = file.metadata.duration;
+    const sourceSize = file.info?.fileSize;
+    if (!durationSeconds || durationSeconds <= 0) return false;
+    if (!sourceSize || sourceSize <= 0) return false;
+
+    const { type, size } = await decryptPlaylistJSON(playlistFileData, file);
+    if (type != "hls_video") return false;
+    if (!size || size <= 0) return false;
+
+    const streamBitrate = calculateBitrate(size, durationSeconds);
+    const sourceBitrate = calculateBitrate(sourceSize, durationSeconds);
+    if (!streamBitrate || !sourceBitrate) return false;
+
+    const cappedTargetBitrate = Math.min(
+        hlsTargetMaxBitrate,
+        sourceBitrate * bitrateCapHeadroom,
+    );
+    const minStreamBitrate = Math.max(
+        hlsTargetMinBitrate,
+        cappedTargetBitrate * recreateStreamMinRatio,
+    );
+    const minSourceBitrate = hlsTargetMaxBitrate * recreateSourceMinRatio;
+
+    return streamBitrate < minStreamBitrate && sourceBitrate >= minSourceBitrate;
+};
+
+const selectLowQualityRecreateCandidates = async (
+    files: EnteFile[],
+    maxResults: number,
+) => {
+    if (maxResults <= 0 || files.length === 0) return [];
+
+    const eligible = files.filter(
+        (file) => file.metadata.duration && file.info?.fileSize,
+    );
+    if (eligible.length === 0) return [];
+
+    const sampleSize = Math.min(
+        eligible.length,
+        Math.max(maxResults, maxResults * 3),
+    );
+    const sample = randomSample(eligible, sampleSize);
+    const results = await Promise.all(
+        sample.map(async (file) => {
+            try {
+                const playlistFileData = await fetchFileData(
+                    "vid_preview",
+                    file.id,
+                );
+                if (!playlistFileData) return undefined;
+                if (await shouldRecreateLowQualityStream(file, playlistFileData))
+                    return file;
+            } catch (e) {
+                log.warn(
+                    `Generate HLS for ${fileLogID(file)} | recreate-check failed`,
+                    e,
+                );
+            }
+            return undefined;
+        }),
+    );
+
+    return results
+        .filter((file): file is EnteFile => Boolean(file))
+        .slice(0, maxResults);
 };
 
 /**
@@ -886,13 +1105,89 @@ const backfillQueue = async (
         ),
     );
 
-    const doneIDs = (await savedProcessedVideoFileIDs()).union(
-        await savedFailedVideoFileIDs(),
-    );
+    const processedIDs = await savedProcessedVideoFileIDs();
+    const failedIDs = await savedFailedVideoFileIDs();
+    const doneIDs = processedIDs.union(failedIDs);
     const pendingVideoFiles = videoFiles.filter((f) => !doneIDs.has(f.id));
 
-    const batch = randomSample(pendingVideoFiles, 50);
+    const maxBatchSize = 50;
+    const minLowQualitySlots = 10;
+    const pendingQuota = Math.max(0, maxBatchSize - minLowQualitySlots);
+
+    const pendingBatch = randomSample(pendingVideoFiles, pendingQuota);
+    const pendingIDs = new Set(pendingBatch.map((file) => file.id));
+    const availableForLowQuality = maxBatchSize - pendingBatch.length;
+
+    const processedVideoFiles = videoFiles.filter(
+        (file) => processedIDs.has(file.id) && !failedIDs.has(file.id),
+    );
+    const lowQualityBatch = await selectLowQualityRecreateCandidates(
+        processedVideoFiles,
+        availableForLowQuality,
+    );
+
+    let batch = [...pendingBatch, ...lowQualityBatch];
+    if (batch.length < maxBatchSize) {
+        const remainingPending = pendingVideoFiles.filter(
+            (file) => !pendingIDs.has(file.id),
+        );
+        const extraPending = randomSample(
+            remainingPending,
+            maxBatchSize - batch.length,
+        );
+        batch = [...batch, ...extraPending];
+    }
     return batch.map((file) => ({ file }));
+};
+
+const updateCurrentProgress = (fileID: number, progress: number) => {
+    if (_state.currentFileID != fileID) return;
+    const clamped = Math.min(1, Math.max(0, progress));
+    const previous = _state.currentProgress;
+    if (previous !== undefined && Math.abs(previous - clamped) < 0.01) {
+        return;
+    }
+    _state.currentProgress = clamped;
+    emitProcessingSnapshot();
+};
+
+const clearCurrentProgress = (fileID: number) => {
+    if (_state.currentFileID != fileID) return;
+    _state.currentProgress = undefined;
+    emitProcessingSnapshot();
+};
+
+const startHLSProgressPolling = (
+    electron: ReturnType<typeof ensureElectron>,
+    fileID: number,
+) => {
+    let stopped = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+
+    const poll = async () => {
+        if (stopped) return;
+        try {
+            const progress = await readGenerateHLSProgress(electron, fileID);
+            if (!stopped && progress !== undefined) {
+                updateCurrentProgress(fileID, progress);
+            }
+        } catch (e) {
+            log.debug(() => [
+                "gen-hls-progress",
+                { fileID, error: String(e) },
+            ]);
+        }
+        if (!stopped) {
+            timeout = setTimeout(poll, progressPollIntervalMs);
+        }
+    };
+
+    void poll();
+
+    return () => {
+        stopped = true;
+        if (timeout) clearTimeout(timeout);
+    };
 };
 
 /**
@@ -917,21 +1212,50 @@ const backfillQueue = async (
 const processQueueItem = async ({
     file,
     timestampedUploadItem,
+    forceRecreate,
 }: VideoProcessingQueueItem) => {
     const electron = ensureElectron();
 
-    log.debug(() => ["gen-hls", { file, timestampedUploadItem }]);
+    log.debug(() => [
+        "gen-hls",
+        { file, timestampedUploadItem, forceRecreate },
+    ]);
 
-    const playlistFileData = await fetchFileData("vid_preview", file.id);
-    if (playlistFileData) {
-        // Since video processing for even an individual item can take
-        // substantial time, it is possible that an item might've gotten
-        // processed on a different client in the interval between us enqueuing
-        // it and us getting here.
-        //
-        // Bail out early to avoid unnecessary duplicate work.
-        log.info(`Generate HLS for ${fileLogID(file)} | already-processed`);
-        return;
+    if (!forceRecreate) {
+        const playlistFileData = await fetchFileData("vid_preview", file.id);
+        if (playlistFileData) {
+            let shouldRecreate = false;
+            try {
+                shouldRecreate = await shouldRecreateLowQualityStream(
+                    file,
+                    playlistFileData,
+                );
+            } catch (e) {
+                log.warn(
+                    `Generate HLS for ${fileLogID(file)} | recreate-check failed`,
+                    e,
+                );
+            }
+
+            // Since video processing for even an individual item can take
+            // substantial time, it is possible that an item might've gotten
+            // processed on a different client in the interval between us
+            // enqueuing it and us getting here.
+            //
+            // Bail out early to avoid unnecessary duplicate work.
+            if (!shouldRecreate) {
+                log.info(
+                    `Generate HLS for ${fileLogID(file)} | already-processed`,
+                );
+                return;
+            }
+
+            log.info(
+                `Generate HLS for ${fileLogID(file)} | recreate-low-quality`,
+            );
+        }
+    } else {
+        log.info(`Generate HLS for ${fileLogID(file)} | force-recreate`);
     }
 
     const uploadItem = timestampedUploadItem
@@ -992,6 +1316,7 @@ const processQueueItem = async ({
     log.info(`Generate HLS for ${fileLogID(file)} | start`);
 
     let res: GenerateHLSResult | undefined;
+    const stopProgressPolling = startHLSProgressPolling(electron, file.id);
     try {
         res = await initiateGenerateHLS(
             electron,
@@ -1014,6 +1339,9 @@ const processQueueItem = async ({
         // retrying the same video again will not work either.
         await markFailedVideoFile(file);
         throw e;
+    } finally {
+        stopProgressPolling();
+        clearCurrentProgress(file.id);
     }
 
     if (!res) {

@@ -8,6 +8,7 @@ import { Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import log from "./log";
 import { ffmpegUtilityProcess } from "./services/ffmpeg";
+import { getFFmpegProgress } from "./services/ffmpeg-progress";
 import { type FFmpegGenerateHLSPlaylistAndSegmentsResult } from "./services/ffmpeg-worker";
 import { markClosableZip, openZip } from "./services/zip";
 import { writeStream } from "./utils/stream";
@@ -77,6 +78,8 @@ const handleStreamRequest = async (request: Request): Promise<Response> => {
                         return handleConvertToMP4Write(request);
                     case "generate-hls":
                         return handleGenerateHLSWrite(request, searchParams);
+                    case "generate-hls-progress":
+                        return handleGenerateHLSProgress(searchParams);
                     default:
                         return new Response(`Unknown op ${op}`, {
                             status: 404,
@@ -354,4 +357,14 @@ const handleGenerateHLSWrite = async (
         if (isInputFileTemporary)
             await deleteTempFileIgnoringErrors(inputFilePath);
     }
+};
+
+const handleGenerateHLSProgress = (params: URLSearchParams) => {
+    const fileID = parseInt(params.get("fileID") ?? "", 10);
+    if (!fileID) return new Response("Missing fileID", { status: 400 });
+
+    const progress = getFFmpegProgress(fileID);
+    if (progress === undefined) return new Response(null, { status: 204 });
+
+    return new Response(JSON.stringify({ progress }), { status: 200 });
 };

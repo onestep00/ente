@@ -173,6 +173,11 @@ const GenerateHLSResult = z.object({
 
 export type GenerateHLSResult = z.infer<typeof GenerateHLSResult>;
 
+const GenerateHLSProgress = z.object({
+    /** Encode progress from 0 to 1. */
+    progress: z.number(),
+});
+
 /**
  * Initate the generation of a HLS stream, streaming the source video contents
  * to the node side.
@@ -258,6 +263,26 @@ export const initiateGenerateHLS = async (
     if (res.status == 204) return undefined;
 
     return GenerateHLSResult.parse(await res.json());
+};
+
+export const readGenerateHLSProgress = async (
+    _: Electron,
+    fileID: number,
+): Promise<number | undefined> => {
+    const params = new URLSearchParams({
+        op: "generate-hls-progress",
+        fileID: fileID.toString(),
+    });
+
+    const url = `stream://video?${params.toString()}`;
+    const res = await fetch(url, { method: "GET" });
+    if (res.status === 204) return undefined;
+    if (!res.ok)
+        throw new Error(
+            `Failed to read HLS progress from ${url}: HTTP ${res.status}`,
+        );
+
+    return GenerateHLSProgress.parse(await res.json()).progress;
 };
 
 /**

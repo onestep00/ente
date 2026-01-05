@@ -4,9 +4,9 @@
 
 // See [Note: Using Electron APIs in UtilityProcess] about what we can and
 // cannot import.
-import shellescape from "any-shell-escape";
 import { expose } from "comlink";
 import pathToFfmpeg from "ffmpeg-static";
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs_ from "node:fs";
 import fs from "node:fs/promises";
@@ -34,6 +34,7 @@ const vaapiVideoEncoder = "h264_vaapi";
 const softwareVideoEncoder = "libx264";
 const vaapiDeviceEnvVar = "ENTE_FFMPEG_VAAPI_DEVICE";
 const defaultVaapiDevice = "/dev/dri/renderD128";
+const ffmpegProgressUpdateIntervalMs = 2000;
 
 type VideoEncoder = "h264_qsv" | "h264_vaapi" | "libx264";
 
@@ -288,6 +289,141 @@ const ffmpegConvertToMP4 = async (
     await execAsyncWorker(cmd);
 };
 
+const parseProgressTimestamp = (value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+
+    const [hms = "", fractional] = trimmed.split(".");
+    if (!hms) return undefined;
+    const parts = hms.split(":").map((part) => parseInt(part, 10) || 0);
+    if (!parts.length) return undefined;
+
+    let [h, m, s] = [0, 0, 0];
+    switch (parts.length) {
+        case 1:
+            s = parts[0]!;
+            break;
+        case 2:
+            m = parts[0]!;
+            s = parts[1]!;
+            break;
+        case 3:
+            h = parts[0]!;
+            m = parts[1]!;
+            s = parts[2]!;
+            break;
+        default:
+            return undefined;
+    }
+
+    const frac = fractional ? parseFloat(`0.${fractional}`) : 0;
+    if (!Number.isFinite(frac)) return undefined;
+
+    return h * 3600 + m * 60 + s + frac;
+};
+
+const parseProgressOutTimeSeconds = (line: string) => {
+    if (line.startsWith("out_time=")) {
+        return parseProgressTimestamp(line.slice("out_time=".length));
+    }
+    if (line.startsWith("out_time_us=")) {
+        const value = parseInt(line.slice("out_time_us=".length), 10);
+        return Number.isFinite(value) ? value / 1_000_000 : undefined;
+    }
+    if (line.startsWith("out_time_ms=")) {
+        const value = parseInt(line.slice("out_time_ms=".length), 10);
+        return Number.isFinite(value) ? value / 1_000_000 : undefined;
+    }
+    return undefined;
+};
+
+const execFFmpegWithProgress = async (
+    command: string[],
+    {
+        stderrPath,
+        durationSeconds,
+        onProgress,
+    }: {
+        stderrPath: string;
+        durationSeconds: number | undefined;
+        onProgress?: (progress: number) => void;
+    },
+) =>
+    new Promise<void>((resolve, reject) => {
+        const [binary, ...args] = command;
+        if (!binary) {
+            reject(new Error("ffmpeg command missing binary"));
+            return;
+        }
+        const child = spawn(binary, args, { windowsHide: true });
+        const stderrStream = fs_.createWriteStream(stderrPath);
+        const reportProgress = (() => {
+            if (!onProgress || !durationSeconds) return undefined;
+            let lastProgress = -1;
+            let lastSentAt = 0;
+            return (progress: number) => {
+                const clamped = Math.min(1, Math.max(0, progress));
+                const now = Date.now();
+                if (
+                    lastProgress >= 0 &&
+                    now - lastSentAt < ffmpegProgressUpdateIntervalMs &&
+                    Math.abs(clamped - lastProgress) < 0.01
+                ) {
+                    return;
+                }
+                lastProgress = clamped;
+                lastSentAt = now;
+                onProgress(clamped);
+            };
+        })();
+
+        if (reportProgress) reportProgress(0);
+
+        let buffer = "";
+        if (child.stdout) {
+            child.stdout.setEncoding("utf8");
+            child.stdout.on("data", (chunk: string) => {
+                buffer += chunk;
+                const lines = buffer.split(/\r?\n/);
+                buffer = lines.pop() ?? "";
+                for (const rawLine of lines) {
+                    const line = rawLine.trim();
+                    if (!line || !reportProgress || !durationSeconds) continue;
+                    const outTimeSeconds = parseProgressOutTimeSeconds(line);
+                    if (outTimeSeconds !== undefined) {
+                        reportProgress(outTimeSeconds / durationSeconds);
+                        continue;
+                    }
+                    if (line.startsWith("progress=") && line.includes("end")) {
+                        reportProgress(1);
+                    }
+                }
+            });
+        }
+
+        if (child.stderr) {
+            child.stderr.pipe(stderrStream);
+        }
+
+        child.on("error", (e: Error) => {
+            stderrStream.close();
+            reject(e);
+        });
+
+        child.on("close", (code: number | null) => {
+            stderrStream.close();
+            if (code === 0) {
+                resolve();
+            } else {
+                reject(
+                    new Error(
+                        `ffmpeg exited with code ${code ?? "unknown"}`,
+                    ),
+                );
+            }
+        });
+    });
+
 export interface FFmpegGenerateHLSPlaylistAndSegmentsResult {
     playlistPath: string;
     dimensions: { width: number; height: number };
@@ -345,7 +481,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
     fetchURL: string,
     authToken: string,
 ): Promise<FFmpegGenerateHLSPlaylistAndSegmentsResult | undefined> => {
-    const { isH264, isHDR, bitrate, width, height, fps } =
+    const { isH264, isHDR, bitrate, width, height, fps, durationSeconds } =
         await detectVideoCharacteristics(inputFilePath);
 
     const targetMaxDimension = 1080;
@@ -380,6 +516,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
             .stat(inputFilePath)
             .then((st) => st.size);
         if (inputVideoSize <= 10 * 1024 * 1024 /* 10 MB */) {
+            mainProcess("ffmpegProgressDone", { fileID });
             return undefined;
         }
     }
@@ -617,11 +754,15 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
         return ["-vaapi_device", device];
     };
 
-    const buildCommand = (encoder: VideoEncoder | undefined) =>
+    const buildCommand = (
+        encoder: VideoEncoder | undefined,
+        includeProgress: boolean,
+    ) =>
         [
             ffmpegBinaryPath(),
             // Reduce the amount of output lines we have to parse.
             ["-hide_banner"],
+            includeProgress ? ["-progress", "pipe:1", "-nostats"] : [],
             buildHardwareDeviceArgs(encoder),
             // Input file. We don't need any extra options that apply to the input file.
             "-i",
@@ -661,13 +802,14 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
         ]);
 
         const runHlsCommand = async (encoder: VideoEncoder | undefined) => {
-            // Tack on the redirection after constructing the command.
-            const commandWithRedirection = `${shellescape(buildCommand(encoder))} 2>${stderrPath}`;
-
-            // Run the ffmpeg command to generate the HLS playlist and segments.
-            //
-            // Note: Depending on the size of the input file, this may take long!
-            await execAsyncWorker(commandWithRedirection);
+            const command = buildCommand(encoder, true);
+            await execFFmpegWithProgress(command, {
+                stderrPath,
+                durationSeconds,
+                onProgress: (progress) => {
+                    mainProcess("ffmpegProgress", { fileID, progress });
+                },
+            });
         };
 
         if (reencodeVideo && preferredVideoEncoder) {
@@ -716,11 +858,14 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
             fetchURL,
             authToken,
         );
+
+        mainProcess("ffmpegProgress", { fileID, progress: 1 });
     } catch (e) {
         log.error("HLS generation failed", e);
         await Promise.all([deletePathIgnoringErrors(playlistPath)]);
         throw e;
     } finally {
+        mainProcess("ffmpegProgressDone", { fileID });
         await Promise.all([
             deletePathIgnoringErrors(stderrPath),
             deletePathIgnoringErrors(keyInfoPath),
@@ -791,6 +936,50 @@ const videoFpsRegex = / ([0-9]+(?:\.[0-9]+)?) fps/;
  */
 const videoTbrRegex = / ([0-9]+(?:\.[0-9]+)?) tbr/;
 
+/**
+ * A regex that matches the first line of the form
+ *
+ *   Duration: 00:00:03.13, start: 0.000000, bitrate: 16088 kb/s
+ *
+ * The part after Duration: and until the first non-digit or colon is the first
+ * capture group, while after the dot is an optional second capture group.
+ */
+const videoDurationLineRegex = /\s\sDuration: ([0-9:]+)(.[0-9]+)?/;
+
+const parseDurationFromFFmpegOutput = (videoInfo: string) => {
+    const matches = videoDurationLineRegex.exec(videoInfo);
+    if (!matches) return undefined;
+
+    // The HH:mm:ss.
+    const ints = (matches.at(1) ?? "")
+        .split(":")
+        .map((s) => parseInt(s, 10) || 0);
+    let [h, m, s] = [0, 0, 0];
+    switch (ints.length) {
+        case 1:
+            s = ints[0]!;
+            break;
+        case 2:
+            m = ints[0]!;
+            s = ints[1]!;
+            break;
+        case 3:
+            h = ints[0]!;
+            m = ints[1]!;
+            s = ints[2]!;
+            break;
+        default:
+            return undefined;
+    }
+
+    // Optional subseconds.
+    const ss = parseFloat(`0${matches.at(2) ?? ""}`);
+
+    // Follow the same round up behaviour that the web side uses.
+    const duration = Math.ceil(h * 3600 + m * 60 + s + ss);
+    return duration > 0 ? duration : undefined;
+};
+
 interface VideoCharacteristics {
     isH264: boolean;
     isHDR: boolean;
@@ -798,6 +987,7 @@ interface VideoCharacteristics {
     width: number | undefined;
     height: number | undefined;
     fps: number | undefined;
+    durationSeconds: number | undefined;
 }
 
 /**
@@ -845,6 +1035,7 @@ const detectVideoCharacteristics = async (inputFilePath: string) => {
         width: undefined,
         height: undefined,
         fps: undefined,
+        durationSeconds: undefined,
     };
     if (!videoStreamLine) return res;
 
@@ -884,6 +1075,8 @@ const detectVideoCharacteristics = async (inputFilePath: string) => {
             res.fps = parsedFps;
         }
     }
+
+    res.durationSeconds = parseDurationFromFFmpegOutput(videoInfo);
 
     return res;
 };
@@ -1263,16 +1456,6 @@ const uploadVideoSegmentsMultipart = async (
 };
 
 /**
- * A regex that matches the first line of the form
- *
- *   Duration: 00:00:03.13, start: 0.000000, bitrate: 16088 kb/s
- *
- * The part after Duration: and until the first non-digit or colon is the first
- * capture group, while after the dot is an optional second capture group.
- */
-const videoDurationLineRegex = /\s\sDuration: ([0-9:]+)(.[0-9]+)?/;
-
-/**
  * Determine the duration of the video at the given {@link inputFilePath}.
  *
  * While the detection works for all known cases, it is still heuristic because
@@ -1281,39 +1464,9 @@ const videoDurationLineRegex = /\s\sDuration: ([0-9:]+)(.[0-9]+)?/;
  */
 export const ffmpegDetermineVideoDuration = async (inputFilePath: string) => {
     const videoInfo = await pseudoFFProbeVideo(inputFilePath);
-    const matches = videoDurationLineRegex.exec(videoInfo);
-
-    const fail = () => {
-        throw new Error(`Cannot parse video duration '${matches?.at(0)}'`);
-    };
-
-    // The HH:mm:ss.
-    const ints = (matches?.at(1) ?? "")
-        .split(":")
-        .map((s) => parseInt(s, 10) || 0);
-    let [h, m, s] = [0, 0, 0];
-    switch (ints.length) {
-        case 1:
-            s = ints[0]!;
-            break;
-        case 2:
-            m = ints[0]!;
-            s = ints[1]!;
-            break;
-        case 3:
-            h = ints[0]!;
-            m = ints[1]!;
-            s = ints[2]!;
-            break;
-        default:
-            fail();
+    const duration = parseDurationFromFFmpegOutput(videoInfo);
+    if (!duration) {
+        throw new Error("Cannot parse video duration from ffmpeg output");
     }
-
-    // Optional subseconds.
-    const ss = parseFloat(`0${matches?.at(2) ?? ""}`);
-
-    // Follow the same round up behaviour that the web side uses.
-    const duration = Math.ceil(h * 3600 + m * 60 + s + ss);
-    if (!duration) fail();
     return duration;
 };

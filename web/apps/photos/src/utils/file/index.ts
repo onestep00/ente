@@ -1,5 +1,6 @@
 import type { AddSaveGroup } from "ente-gallery/components/utils/save-groups";
 import { downloadAndSaveFiles } from "ente-gallery/services/save";
+import { recreateVideoStreams } from "ente-gallery/services/video";
 import type { EnteFile } from "ente-media/file";
 import { ItemVisibility } from "ente-media/file-metadata";
 import { type SelectionContext } from "ente-new/photos/components/gallery";
@@ -100,6 +101,9 @@ export const performFileOp = async (
                 clearTempDeleted();
                 throw e;
             }
+            break;
+        case "recreateStream":
+            recreateVideoStreams(files);
             break;
     }
 };

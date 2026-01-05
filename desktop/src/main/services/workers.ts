@@ -14,6 +14,10 @@ import path from "node:path";
 import type { UtilityProcessType } from "../../types/ipc";
 import log, { processUtilityProcessLogMessage } from "../log";
 import { messagePortMainEndpoint } from "../utils/comlink";
+import {
+    scheduleClearFFmpegProgress,
+    setFFmpegProgress,
+} from "./ffmpeg-progress";
 
 /**
  * Terminate any existing utility processes if they're running.
@@ -223,6 +227,34 @@ const createFFmpegUtilityProcessEndpoint = () => {
                 case "ack":
                     resolve!(messagePortMainEndpoint(port2));
                     return;
+                case "ffmpegProgress": {
+                    const payload = (m as { p?: unknown }).p as
+                        | { fileID?: number; progress?: number }
+                        | undefined;
+                    if (
+                        !payload ||
+                        typeof payload.fileID != "number" ||
+                        typeof payload.progress != "number"
+                    ) {
+                        log.warn("Ignoring malformed ffmpeg progress message");
+                        return;
+                    }
+                    setFFmpegProgress(payload.fileID, payload.progress);
+                    return;
+                }
+                case "ffmpegProgressDone": {
+                    const payload = (m as { p?: unknown }).p as
+                        | { fileID?: number }
+                        | undefined;
+                    if (!payload || typeof payload.fileID != "number") {
+                        log.warn(
+                            "Ignoring malformed ffmpeg progress done message",
+                        );
+                        return;
+                    }
+                    scheduleClearFFmpegProgress(payload.fileID);
+                    return;
+                }
             }
         }
 

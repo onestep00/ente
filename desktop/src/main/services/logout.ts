@@ -1,6 +1,7 @@
 import type { FSWatcher } from "chokidar";
 import log from "../log";
 import { clearPendingVideoResults } from "../stream";
+import { clearFFmpegProgress } from "./ffmpeg-progress";
 import { clearStores } from "./store";
 import { watchReset } from "./watch";
 import { terminateUtilityProcesses } from "./workers";
@@ -26,6 +27,11 @@ export const logout = (watcher: FSWatcher) => {
         clearPendingVideoResults();
     } catch (e) {
         ignoreError("video", e);
+    }
+    try {
+        clearFFmpegProgress();
+    } catch (e) {
+        ignoreError("ffmpeg progress", e);
     }
     try {
         clearStores();

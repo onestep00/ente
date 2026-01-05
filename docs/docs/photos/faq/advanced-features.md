@@ -190,7 +190,7 @@ For complete details, see the [Video Streaming feature guide](/photos/features/u
 
 ### What is a stream technically? {#what-is-a-stream}
 
-A stream is an encrypted HLS file with a `.m3u8` playlist. Ente converts videos to 720p at 2mbps in H.264 format. The stream is encrypted with AES and the playlist with XChaCha20.
+A stream is an encrypted HLS file with a `.m3u8` playlist. Ente converts videos to H.264 at up to 1080p, targeting roughly 5-12 Mbps depending on the source (higher caps on devices using hardware encoding). The stream is encrypted with AES and the playlist with XChaCha20.
 
 Due to encryption, Ente cannot read the contents, duration, or number of chunks within the generated stream.
 
