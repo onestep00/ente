@@ -414,10 +414,7 @@ class VideoPreviewService {
   }
 
   List<String> _preferredHardwareEncoders() {
-    if (Platform.isAndroid) {
-      // MediaCodec H.264 output can break HLS seek on Android; use software.
-      return const [];
-    }
+    if (Platform.isAndroid) return const ["h264_mediacodec"];
     if (Platform.isIOS) return const ["h264_videotoolbox"];
     if (Platform.isWindows) {
       return const ["h264_nvenc", "h264_qsv", "h264_amf"];
@@ -443,7 +440,11 @@ class VideoPreviewService {
     required int maxTargetBufferKbps,
     required String keyframeArgs,
   }) {
-    return "-c:v $encoder -b:v ${targetBitrateKbps}k "
+    final encoderExtras = encoder == "h264_mediacodec"
+        // MediaCodec is picky about pixel format and B-frames.
+        ? "-pix_fmt nv12 -profile:v baseline -bf 0 "
+        : "";
+    return "-c:v $encoder $encoderExtras-b:v ${targetBitrateKbps}k "
         "-maxrate ${maxTargetBitrateKbps}k "
         "-bufsize ${maxTargetBufferKbps}k $keyframeArgs";
   }
@@ -514,6 +515,33 @@ class VideoPreviewService {
     buffer
       ..write('-force_key_frames "expr:gte(t,n_forced*$intervalSeconds)" ');
     return buffer.toString();
+  }
+
+  String _buildVideoFilters({
+    required bool reencodeVideo,
+    required bool rescaleVideo,
+    required bool applyFps,
+    required bool needsTonemap,
+    required String pixelFormat,
+  }) {
+    if (!reencodeVideo) return "";
+
+    final videoFilters = <String>[];
+    if (rescaleVideo) {
+      videoFilters.add(
+        "scale='if(lt(iw,ih),min($_maxTargetDimension,iw),-2)':'if(lt(iw,ih),-2,min($_maxTargetDimension,ih))'",
+      );
+    }
+    if (applyFps) videoFilters.add("fps=$_maxTargetFps");
+    if (needsTonemap) {
+      videoFilters.addAll([
+        'zscale=transfer=linear',
+        'tonemap=tonemap=hable:desat=0',
+        'zscale=primaries=709:transfer=709:matrix=709',
+      ]);
+    }
+    videoFilters.add("format=$pixelFormat");
+    return '-vf "${videoFilters.join(",")}" ';
   }
 
   ({int minStreamBitrateKbps, int minSourceBitrateKbps})
@@ -888,36 +916,20 @@ class VideoPreviewService {
         maxBitrateKbps: maxTargetBitrateKbps,
       );
 
-      String filters = "";
-
-      if (reencodeVideo) {
-        final videoFilters = <String>[];
-
-        if (rescaleVideo) {
-          // scale smaller dimension to 1080p (or keep original if less than 1080p)
-          // portrait: scale width to min(1080,iw), landscape: scale height to min(1080,ih)
-          videoFilters.add(
-            "scale='if(lt(iw,ih),min($_maxTargetDimension,iw),-2)':'if(lt(iw,ih),-2,min($_maxTargetDimension,ih))'",
-          );
-        }
-
-        // cap fps at 60 if it is higher
-        if (applyFPS) videoFilters.add("fps=$_maxTargetFps");
-
-        if (needsTonemap) {
-          // apply tonemapping for HDR videos
-          videoFilters.addAll([
-            'zscale=transfer=linear',
-            'tonemap=tonemap=hable:desat=0',
-            'zscale=primaries=709:transfer=709:matrix=709',
-          ]);
-        }
-
-        if (videoFilters.isNotEmpty) {
-          videoFilters.add("format=yuv420p");
-          filters = '-vf "${videoFilters.join(",")}" ';
-        }
-      }
+      final String softwareFilters = _buildVideoFilters(
+        reencodeVideo: reencodeVideo,
+        rescaleVideo: rescaleVideo,
+        applyFps: applyFPS,
+        needsTonemap: needsTonemap,
+        pixelFormat: "yuv420p",
+      );
+      final String hardwareFilters = _buildVideoFilters(
+        reencodeVideo: reencodeVideo,
+        rescaleVideo: rescaleVideo,
+        applyFps: applyFPS,
+        needsTonemap: needsTonemap,
+        pixelFormat: "nv12",
+      );
 
       final audioArgs = '-c:a aac -b:a 128k ';
       final hlsArgs = '-f hls -hls_time $_hlsSegmentDurationSeconds '
@@ -927,6 +939,7 @@ class VideoPreviewService {
       String videoArgs = '-c:v copy ';
       String encoderLabel = "copy";
       List<String> hardwareEncodersToTry = const [];
+      String filters = "";
       if (reencodeVideo) {
         final softwareVideoArgs = _buildSoftwareVideoArgs(
           targetBitrateKbps: targetBitrateKbps,
@@ -937,6 +950,7 @@ class VideoPreviewService {
         if (hardwareEncoders.isNotEmpty) {
           hardwareEncodersToTry = hardwareEncoders;
           encoderLabel = hardwareEncodersToTry.first;
+          filters = hardwareFilters;
           videoArgs = _buildHardwareVideoArgs(
             encoder: encoderLabel,
             targetBitrateKbps: targetBitrateKbps,
@@ -944,9 +958,11 @@ class VideoPreviewService {
             maxTargetBufferKbps: maxTargetBufferKbps,
             keyframeArgs: hardwareKeyframeArgs,
           );
-          fallbackCommand = '$filters$softwareVideoArgs$audioArgs$hlsArgs';
+          fallbackCommand =
+              '$softwareFilters$softwareVideoArgs$audioArgs$hlsArgs';
         } else {
           encoderLabel = "libx264";
+          filters = softwareFilters;
           videoArgs = softwareVideoArgs;
         }
       }
@@ -1022,7 +1038,7 @@ class VideoPreviewService {
             encoderOverride: encoderLabel,
           );
           playlistGenResult = await runPlaylistCommand(
-            '$filters$retryVideoArgs$audioArgs$hlsArgs',
+            '$hardwareFilters$retryVideoArgs$audioArgs$hlsArgs',
             outputPath: outputPlaylistPath,
           );
           playlistGenReturnCode = playlistGenResult["returnCode"] as int?;
