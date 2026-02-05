@@ -2,6 +2,7 @@ import "dart:async";
 import "dart:math";
 import "dart:typed_data";
 
+import 'package:ente_pure_utils/ente_pure_utils.dart';
 import 'package:flutter/material.dart';
 import 'package:logging/logging.dart';
 import 'package:photos/core/cache/thumbnail_in_memory_cache.dart';
@@ -25,7 +26,6 @@ import 'package:photos/ui/viewer/file/file_icons_widget.dart';
 import 'package:photos/ui/viewer/gallery/component/group/type.dart';
 import 'package:photos/ui/viewer/gallery/state/gallery_context_state.dart';
 import 'package:photos/utils/file_util.dart';
-import 'package:photos/utils/standalone/task_queue.dart';
 import 'package:photos/utils/thumbnail_util.dart';
 
 class ThumbnailWidget extends StatefulWidget {
@@ -200,14 +200,8 @@ class _ThumbnailWidgetState extends State<ThumbnailWidget> {
         }
       }
 
-      if (widget.file.fileType == FileType.video) {
-        if (widget.shouldShowVideoDuration) {
-          contentChildren
-              .add(VideoOverlayDuration(duration: widget.file.duration!));
-        } else if (widget.shouldShowVideoOverlayIcon) {
-          contentChildren.add(const VideoOverlayIcon());
-        }
-      } else if (widget.shouldShowLivePhotoOverlay &&
+      if (widget.file.fileType != FileType.video &&
+          widget.shouldShowLivePhotoOverlay &&
           widget.file.isLiveOrMotionPhoto) {
         contentChildren.add(const LivePhotoOverlayIcon());
       }
@@ -238,7 +232,18 @@ class _ThumbnailWidgetState extends State<ThumbnailWidget> {
       const ThumbnailPlaceHolder(),
       content ?? const SizedBox(),
     ];
-    if (widget.shouldShowSyncStatus && !widget.file.isUploaded) {
+    if (!widget.rawThumbnail && widget.file.fileType == FileType.video) {
+      if (widget.shouldShowVideoDuration) {
+        viewChildren.add(
+          VideoOverlayDuration(duration: widget.file.duration),
+        );
+      } else if (widget.shouldShowVideoOverlayIcon) {
+        viewChildren.add(const VideoOverlayIcon());
+      }
+    }
+    if (widget.shouldShowSyncStatus &&
+        !widget.file.isUploaded &&
+        !isOfflineMode) {
       viewChildren.add(const UnSyncedIcon());
     }
 

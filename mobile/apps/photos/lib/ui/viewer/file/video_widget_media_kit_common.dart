@@ -1,5 +1,6 @@
 import "dart:async";
 
+import "package:ente_pure_utils/ente_pure_utils.dart";
 import "package:flutter/material.dart";
 import "package:media_kit_video/media_kit_video.dart";
 import "package:photos/models/file/file.dart";
@@ -10,13 +11,14 @@ import "package:photos/ui/actions/file/file_actions.dart";
 import "package:photos/ui/common/loading_widget.dart";
 import "package:photos/ui/viewer/file/video_fit_mode.dart";
 import "package:photos/ui/viewer/file/video_stream_change.dart";
-import "package:photos/utils/standalone/date_time.dart";
-import "package:photos/utils/standalone/debouncer.dart";
+import "package:photos/ui/viewer/file/zoomable_video_viewer.dart";
 
 class VideoWidget extends StatefulWidget {
   final EnteFile file;
   final VideoController controller;
   final FullScreenRequestCallback? playbackCallback;
+  final TransformationController? transformationController;
+  final Function(bool)? shouldDisableScroll;
   final bool isFromMemories;
   final void Function() onStreamChange;
   final bool isPreviewPlayer;
@@ -26,6 +28,8 @@ class VideoWidget extends StatefulWidget {
     this.controller,
     this.playbackCallback, {
     super.key,
+    this.transformationController,
+    this.shouldDisableScroll,
     required this.isFromMemories,
     // ignore: unused_element
     required this.onStreamChange,
@@ -53,12 +57,7 @@ class _VideoWidgetState extends State<VideoWidget> {
   double _scrubSecondsPerPixel = 0;
   int _scrubTargetMs = 0;
   int _scrubDurationMs = 0;
-  static const double _minZoomScale = 1.0;
-  static const double _maxZoomScale = 4.0;
   final Map<int, Offset> _activePointers = {};
-  double _zoomScale = _minZoomScale;
-  double _pinchStartScale = _minZoomScale;
-  double _pinchStartDistance = 0;
   bool _isPinching = false;
   VideoFitMode? _fitModeOverride;
   int? _videoWidth;
@@ -184,9 +183,7 @@ class _VideoWidgetState extends State<VideoWidget> {
   }
 
   void _resetZoom() {
-    _zoomScale = _minZoomScale;
-    _pinchStartScale = _minZoomScale;
-    _pinchStartDistance = 0;
+    widget.transformationController?.value = Matrix4.identity();
     _isPinching = false;
     _activePointers.clear();
   }
@@ -198,8 +195,6 @@ class _VideoWidgetState extends State<VideoWidget> {
         _onScrubCancel();
       }
       _isPinching = true;
-      _pinchStartDistance = _pointerDistance();
-      _pinchStartScale = _zoomScale;
       _hideControlsDebouncer.cancelDebounceTimer();
       showControlsNotifier.value = true;
     }
@@ -208,36 +203,13 @@ class _VideoWidgetState extends State<VideoWidget> {
   void _handlePointerMove(PointerMoveEvent event) {
     if (!_activePointers.containsKey(event.pointer)) return;
     _activePointers[event.pointer] = event.position;
-    if (!_isPinching || _activePointers.length < 2) return;
-    if (_pinchStartDistance <= 0) return;
-    final distance = _pointerDistance();
-    if (distance <= 0) return;
-    final scale = distance / _pinchStartDistance;
-    final nextScale =
-        (_pinchStartScale * scale).clamp(_minZoomScale, _maxZoomScale);
-    if (nextScale == _zoomScale) return;
-    setState(() {
-      _zoomScale = nextScale;
-    });
   }
 
   void _handlePointerEnd(PointerEvent event) {
     _activePointers.remove(event.pointer);
     if (_activePointers.length < 2) {
       _isPinching = false;
-      _pinchStartDistance = 0;
-      if (_zoomScale <= _minZoomScale + 0.01 && _zoomScale != _minZoomScale) {
-        setState(() {
-          _zoomScale = _minZoomScale;
-        });
-      }
     }
-  }
-
-  double _pointerDistance() {
-    if (_activePointers.length < 2) return 0;
-    final points = _activePointers.values.take(2).toList();
-    return (points[0] - points[1]).distance;
   }
 
   void _onScrubStart(DragStartDetails _) {
@@ -332,29 +304,33 @@ class _VideoWidgetState extends State<VideoWidget> {
   @override
   Widget build(BuildContext context) {
     final fitMode = _currentFitMode(context);
+    final videoWidget = Video(
+      controller: widget.controller,
+      fit: videoFitModeToBoxFit(fitMode),
+      controls: NoVideoControls,
+    );
+    final videoLayer = widget.transformationController != null
+        ? ZoomableVideoViewer(
+            transformationController: widget.transformationController!,
+            shouldDisableScroll: widget.shouldDisableScroll,
+            child: videoWidget,
+          )
+        : videoWidget;
+
     return Stack(
       fit: StackFit.expand,
       children: [
-        ClipRect(
-          child: Transform.scale(
-            scale: _zoomScale,
-            alignment: Alignment.center,
-            child: Video(
-              controller: widget.controller,
-              fit: videoFitModeToBoxFit(fitMode),
-              controls: null,
-            ),
-          ),
-        ),
+        ClipRect(child: videoLayer),
         ValueListenableBuilder(
           valueListenable: showControlsNotifier,
           builder: (context, value, _) {
+            final enableScrub = !widget.isFromMemories;
             return AnimatedOpacity(
               duration: const Duration(milliseconds: 200),
               opacity: value ? 1 : 0,
               curve: Curves.easeInOutQuad,
               child: Listener(
-                behavior: HitTestBehavior.opaque,
+                behavior: HitTestBehavior.translucent,
                 onPointerDown: _handlePointerDown,
                 onPointerMove: _handlePointerMove,
                 onPointerUp: _handlePointerEnd,
@@ -363,7 +339,7 @@ class _VideoWidgetState extends State<VideoWidget> {
                   alignment: Alignment.center,
                   children: [
                     GestureDetector(
-                      behavior: HitTestBehavior.opaque,
+                      behavior: HitTestBehavior.translucent,
                       onTap: widget.isFromMemories
                           ? null
                           : () {
@@ -376,18 +352,13 @@ class _VideoWidgetState extends State<VideoWidget> {
                                 );
                               }
                             },
-                      onHorizontalDragStart: value && !widget.isFromMemories
-                          ? _onScrubStart
-                          : null,
-                      onHorizontalDragUpdate: value && !widget.isFromMemories
-                          ? _onScrubUpdate
-                          : null,
-                      onHorizontalDragEnd: value && !widget.isFromMemories
-                          ? _onScrubEnd
-                          : null,
-                      onHorizontalDragCancel: value && !widget.isFromMemories
-                          ? _onScrubCancel
-                          : null,
+                      onHorizontalDragStart:
+                          enableScrub ? _onScrubStart : null,
+                      onHorizontalDragUpdate:
+                          enableScrub ? _onScrubUpdate : null,
+                      onHorizontalDragEnd: enableScrub ? _onScrubEnd : null,
+                      onHorizontalDragCancel:
+                          enableScrub ? _onScrubCancel : null,
                       onLongPress: () {
                         if (widget.isFromMemories) {
                           widget.playbackCallback?.call(

@@ -123,11 +123,18 @@ class VideoPreviewService {
   static const String _videoStreamingEnabled = "videoStreamingEnabled";
 
   bool get isVideoStreamingEnabled {
+    if (isOfflineMode) {
+      return false;
+    }
     return serviceLocator.prefs.getBool(_videoStreamingEnabled) ??
         flagService.streamEnabledByDefault;
   }
 
   Future<void> setIsVideoStreamingEnabled(bool value) async {
+    if (flagService.internalUser) {
+      return;
+    }
+
     serviceLocator.prefs.setBool(_videoStreamingEnabled, value).ignore();
     Bus.instance.fire(VideoStreamingChanged());
 

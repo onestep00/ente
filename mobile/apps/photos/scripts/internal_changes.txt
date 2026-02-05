@@ -1,8 +1,10 @@
-- Neeraj: Jump to date when clicking on album from file info [QOL]
-- Neeraj: Add camera make/model search and filter by model [feature](https://github.com/ente-io/ente/discussions/5588)
-- Neeraj: Fixed order for [pinned albums](https://github.com/ente-io/ente/discussions/5979)
-- Neeraj: Show recent move/add to collections on top (in memory) [QOL]
-- Prateek: (i) Stop streaming if not 75% processed for upload and thermal change
-- Prateek(i): Stop streaming immediately on log-out
-- Prateek: (i) Add "Start with latest backups"  (last 7 days onwards)
-- Neeraj: (i) Admin Role + Suggest Delete feature
+- Ashil: Social notification improvements
+- Laurens: Notifications for comments and likes
+- Neeraj: Fix incorrect thumbnail for local files
+- Neeraj: QOL: Parse duration & always show video indicator/duration 
+- Ashil: QOL: Option to remove hidden files from outside of hidden
+- Neeraj: Show on device albums in search result
+- Ashil: Scroll to parent comment on tapping it in reply bubble
+- Ashil: QOL: Support for hiding incoming shared albums
+- Prateek: (i) Always enable video streaming
+- Prateek: Add "Start with latest backups"  (last 7 days onwards) (20% rollout)

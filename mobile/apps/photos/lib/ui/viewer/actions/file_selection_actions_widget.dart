@@ -1,6 +1,7 @@
 import "dart:async";
 
 import 'package:ente_icons/ente_icons.dart';
+import "package:ente_pure_utils/ente_pure_utils.dart";
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import "package:local_auth/local_auth.dart";
@@ -37,6 +38,7 @@ import 'package:photos/ui/components/buttons/button_widget.dart';
 import 'package:photos/ui/components/models/button_type.dart';
 import 'package:photos/ui/notification/toast.dart';
 import "package:photos/ui/tools/collage/collage_creator_page.dart";
+import "package:photos/ui/viewer/actions/suggest_delete_sheet.dart";
 import "package:photos/ui/viewer/date/edit_date_sheet.dart";
 import "package:photos/ui/viewer/file/detail_page.dart";
 import "package:photos/ui/viewer/location/update_location_data_widget.dart";
@@ -45,9 +47,7 @@ import 'package:photos/utils/delete_file_util.dart';
 import "package:photos/utils/dialog_util.dart";
 import "package:photos/utils/file_download_util.dart";
 import 'package:photos/utils/magic_util.dart';
-import 'package:photos/utils/navigation_util.dart';
 import "package:photos/utils/share_util.dart";
-import "package:photos/utils/standalone/simple_task_queue.dart";
 
 class FileSelectionActionsWidget extends StatefulWidget {
   final GalleryType type;
@@ -79,11 +79,6 @@ class _FileSelectionActionsWidgetState
   late FilesSplit split;
   late CollectionActions collectionActions;
   late bool isCollectionOwner;
-  static const String _suggestDeleteLabel = "(i) Suggest deletion";
-  static const String _suggestDeleteDialogTitle = "(i) Suggest deletion";
-  static const String _suggestDeleteDialogBody =
-      "(i) Selected photos will be removed from this album. Photo owners will also get a suggestion to review and delete the photos";
-  static const String _suggestDeleteSentMessage = "(i) Delete suggestion sent.";
   // _cachedCollectionForSharedLink is primarily used to avoid creating duplicate
   // links if user keeps on creating Create link button after selecting
   // few files. This link is reset on any selection changed;
@@ -160,11 +155,11 @@ class _FileSelectionActionsWidgetState
     final bool isCollectionOwnerOrAdmin = widget.collection != null &&
         (widget.collection!.isOwner(currentUserID) ||
             widget.collection!.isAdmin(currentUserID));
-    final bool canSuggestDeleteAction = flagService.enableDeleteSuggestion &&
+    final bool canSuggestDeleteAction =
         (widget.type == GalleryType.sharedCollection ||
-            widget.type == GalleryType.ownedCollection) &&
-        isCollectionOwnerOrAdmin &&
-        split.ownedByOtherUsers.isNotEmpty;
+                widget.type == GalleryType.ownedCollection) &&
+            isCollectionOwnerOrAdmin &&
+            split.ownedByOtherUsers.isNotEmpty;
 
     //To animate adding and removing of [SelectedActionButton], add all items
     //and set [shouldShow] to false for items that should not be shown and true
@@ -183,6 +178,14 @@ class _FileSelectionActionsWidgetState
           icon: Icons.delete_forever_outlined,
           labelText: AppLocalizations.of(context).permanentlyDelete,
           onTap: _permanentlyDelete,
+        ),
+      );
+    } else if (widget.type == GalleryType.cleanupHiddenFromDevice) {
+      items.add(
+        SelectionActionButton(
+          icon: Icons.delete_outline,
+          labelText: AppLocalizations.of(context).deleteFromDevice,
+          onTap: _deleteSelectedFromDevice,
         ),
       );
     } else if (widget.type == GalleryType.deleteSuggestions) {
@@ -256,7 +259,7 @@ class _FileSelectionActionsWidgetState
 
       final showUploadIcon = widget.type == GalleryType.localFolder &&
           split.ownedByCurrentUser.isEmpty;
-      if (widget.type.showAddToAlbum()) {
+      if (widget.type.showAddToAlbum() && !isOfflineMode) {
         if (showUploadIcon) {
           items.add(
             SelectionActionButton(
@@ -333,7 +336,7 @@ class _FileSelectionActionsWidgetState
         items.add(
           SelectionActionButton(
             icon: Icons.flag_outlined,
-            labelText: _suggestDeleteLabel,
+            labelText: AppLocalizations.of(context).suggestDeletion,
             onTap: _onSuggestDelete,
           ),
         );
@@ -670,47 +673,16 @@ class _FileSelectionActionsWidgetState
     if (filesToSuggest.isEmpty) {
       return;
     }
-    final actionResult = await showActionSheet(
+    final didSuggestDelete = await showSuggestDeleteSheet(
       context: context,
-      title: _suggestDeleteDialogTitle,
-      body: _suggestDeleteDialogBody,
-      actionSheetType: ActionSheetType.defaultActionSheet,
-      buttons: [
-        ButtonWidget(
-          labelText: _suggestDeleteLabel,
-          buttonType: ButtonType.neutral,
-          buttonSize: ButtonSize.large,
-          shouldStickToDarkTheme: true,
-          buttonAction: ButtonAction.first,
-          isInAlert: true,
-          onTap: () async {
-            await CollectionsService.instance.suggestDeleteFromCollection(
-              widget.collection!.id,
-              filesToSuggest,
-            );
-            showShortToast(
-              context,
-              _suggestDeleteSentMessage,
-            );
-          },
-        ),
-        ButtonWidget(
-          labelText: AppLocalizations.of(context).cancel,
-          buttonType: ButtonType.secondary,
-          buttonSize: ButtonSize.large,
-          buttonAction: ButtonAction.second,
-          shouldStickToDarkTheme: true,
-          isInAlert: true,
-        ),
-      ],
+      onConfirm: () async {
+        await CollectionsService.instance.suggestDeleteFromCollection(
+          widget.collection!.id,
+          filesToSuggest,
+        );
+      },
     );
-    if (actionResult?.action == ButtonAction.error) {
-      await showGenericErrorDialog(
-        context: context,
-        error: actionResult?.exception ??
-            Exception("Failed to send delete suggestion"),
-      );
-    } else if (actionResult?.action == ButtonAction.first) {
+    if (didSuggestDelete) {
       widget.selectedFiles.clearAll();
       if (mounted) {
         setState(() => {});
@@ -780,14 +752,20 @@ class _FileSelectionActionsWidgetState
       );
       return;
     }
-    final hasPersons =
-        await AddFilesToPersonPage.ensureNamedPersonsExist(context);
-    if (!mounted || !hasPersons) {
+    final namedPersons =
+        await AddFilesToPersonPage.prefetchNamedPersons(context);
+    if (!mounted) {
+      return;
+    }
+    if (namedPersons != null && namedPersons.isEmpty) {
       return;
     }
     final result = await routeToPage(
       context,
-      AddFilesToPersonPage(files: filesWithIds),
+      AddFilesToPersonPage(
+        files: filesWithIds,
+        initialPersons: namedPersons,
+      ),
       forceCustomPageRoute: true,
     );
     if (result is! ManualPersonAssignmentResult) {
@@ -1048,8 +1026,11 @@ class _FileSelectionActionsWidgetState
         _cachedCollectionForSharedLink!,
       );
       unawaited(Clipboard.setData(ClipboardData(text: url)));
-      await shareText(
+      const description =
+          'Check out, comment and react on photos privately with Ente\'s end to end encryption';
+      await shareLinkWithDescription(
         url,
+        description: description,
         context: context,
         key: sendLinkButtonKey,
       );
@@ -1069,6 +1050,50 @@ class _FileSelectionActionsWidgetState
       context,
       widget.selectedFiles.files.toList(),
     )) {
+      widget.selectedFiles.clearAll();
+    }
+  }
+
+  Future<void> _deleteSelectedFromDevice() async {
+    final filesToDelete = widget.selectedFiles.files.toList();
+    final l10n = AppLocalizations.of(context);
+
+    final actionResult = await showActionSheet(
+      context: context,
+      buttons: [
+        ButtonWidget(
+          labelText: l10n.deleteFromDevice,
+          buttonType: ButtonType.neutral,
+          buttonSize: ButtonSize.large,
+          shouldStickToDarkTheme: true,
+          buttonAction: ButtonAction.first,
+          shouldSurfaceExecutionStates: true,
+          isInAlert: true,
+          onTap: () async {
+            try {
+              await deleteFilesOnDeviceOnly(context, filesToDelete);
+            } catch (e) {
+              if (context.mounted) {
+                await showGenericErrorDialog(context: context, error: e);
+              }
+              rethrow;
+            }
+          },
+        ),
+        ButtonWidget(
+          labelText: l10n.cancel,
+          buttonType: ButtonType.secondary,
+          buttonSize: ButtonSize.large,
+          shouldStickToDarkTheme: true,
+          buttonAction: ButtonAction.cancel,
+          isInAlert: true,
+        ),
+      ],
+      body: l10n.theseItemsWillBeDeletedFromYourDevice,
+      actionSheetType: ActionSheetType.defaultActionSheet,
+    );
+
+    if (actionResult?.action == ButtonAction.first) {
       widget.selectedFiles.clearAll();
     }
   }

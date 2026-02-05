@@ -2,13 +2,13 @@ import "dart:async";
 import "dart:io";
 
 import "package:computer/computer.dart";
+import "package:ente_pure_utils/ente_pure_utils.dart";
 import 'package:flutter/foundation.dart';
 import 'package:logging/logging.dart';
 import 'package:path/path.dart';
 import 'package:path_provider/path_provider.dart';
 import "package:photos/db/common/base.dart";
 import "package:photos/db/common/conflict_algo.dart";
-import "package:photos/extensions/stop_watch.dart";
 import 'package:photos/models/backup_status.dart';
 import 'package:photos/models/file/file.dart';
 import 'package:photos/models/file/file_type.dart';
@@ -585,6 +585,56 @@ class FilesDB with SqlDbBase {
       ids.add(result[columnUploadedFileID] as int);
     }
     return ids;
+  }
+
+  /// Checks which (fileID, collectionID) pairs exist in the database.
+  ///
+  /// Returns a set of keys in the format "collectionID_fileID" for files that exist.
+  /// This is more efficient than calling getUploadedFile() for each pair.
+  Future<Set<String>> getExistingFileKeys(
+    Set<(int fileID, int collectionID)> pairs,
+  ) async {
+    if (pairs.isEmpty) return {};
+
+    final db = await instance.sqliteAsyncDB;
+    final existingKeys = <String>{};
+
+    // Build a query with OR conditions for each pair
+    // SQLite has a limit on compound SELECT statements, so we batch
+    const batchSize = 100;
+    final pairsList = pairs.toList();
+
+    for (var i = 0; i < pairsList.length; i += batchSize) {
+      final batch = pairsList.sublist(
+        i,
+        i + batchSize > pairsList.length ? pairsList.length : i + batchSize,
+      );
+
+      final conditions = batch
+          .map(
+            (_) => '($columnUploadedFileID = ? AND $columnCollectionID = ?)',
+          )
+          .join(' OR ');
+
+      final args = <Object>[];
+      for (final (fileID, collectionID) in batch) {
+        args.add(fileID);
+        args.add(collectionID);
+      }
+
+      final results = await db.getAll(
+        'SELECT $columnUploadedFileID, $columnCollectionID FROM $filesTable WHERE $conditions',
+        args,
+      );
+
+      for (final row in results) {
+        final fileID = row[columnUploadedFileID] as int;
+        final collectionID = row[columnCollectionID] as int;
+        existingKeys.add('${collectionID}_$fileID');
+      }
+    }
+
+    return existingKeys;
   }
 
   Future<(Set<int>, Map<String, int>)> getUploadAndHash(
@@ -1643,6 +1693,56 @@ class FilesDB with SqlDbBase {
     return collectionIDsOfFiles;
   }
 
+  /// Returns only uploaded file IDs from given collections.
+  /// If [ownerID] is provided, only returns files owned by that user.
+  Future<List<int>> getUploadedFileIDsInCollections(
+    Set<int> collectionIds, {
+    int? ownerID,
+  }) async {
+    if (collectionIds.isEmpty) {
+      return [];
+    }
+    final db = await instance.sqliteAsyncDB;
+    final inParam = collectionIds.join(',');
+
+    String query = '''
+      SELECT DISTINCT $columnUploadedFileID FROM $filesTable
+      WHERE $columnCollectionID IN ($inParam)
+      AND $columnUploadedFileID IS NOT NULL
+      AND $columnUploadedFileID != -1
+    ''';
+
+    final List<Object> args = [];
+    if (ownerID != null) {
+      query += ' AND $columnOwnerID = ?';
+      args.add(ownerID);
+    }
+
+    final results = await db.getAll(query, args);
+    return results.map((row) => row[columnUploadedFileID] as int).toList();
+  }
+
+  /// Returns only collection IDs that contain any of the given uploaded file
+  /// IDs.
+  Future<Set<int>> getCollectionIDsForUploadedFileIDs(
+    List<int> uploadedFileIds,
+  ) async {
+    if (uploadedFileIds.isEmpty) {
+      return {};
+    }
+    final db = await instance.sqliteAsyncDB;
+    final inParam = uploadedFileIds.join(',');
+    final results = await db.getAll(
+      '''
+      SELECT DISTINCT $columnCollectionID FROM $filesTable
+      WHERE $columnUploadedFileID IN ($inParam)
+      AND $columnCollectionID IS NOT NULL
+      AND $columnCollectionID != -1
+    ''',
+    );
+    return results.map((row) => row[columnCollectionID] as int).toSet();
+  }
+
   List<EnteFile> convertToFilesForIsolate(Map args) {
     final List<EnteFile> files = [];
     for (final result in args["result"]) {
@@ -1798,13 +1898,85 @@ class FilesDB with SqlDbBase {
     final db = await instance.sqliteAsyncDB;
     final results = await db.getAll('''
       SELECT DISTINCT $columnUploadedFileID FROM $filesTable
-      WHERE  $columnUploadedFileID IS NOT NULL AND $columnUploadedFileID IS NOT -1    
+      WHERE  $columnUploadedFileID IS NOT NULL AND $columnUploadedFileID IS NOT -1
     ''');
     final ids = <int>{};
     for (final result in results) {
       ids.add(result[columnUploadedFileID] as int);
     }
     return ids.length;
+  }
+
+  /// Returns hidden files that have local copies on the device.
+  /// Only returns files owned by [ownerID] from the specified
+  /// [hiddenCollectionIds].
+  /// Results are deduplicated by uploadedFileID
+  Future<List<EnteFile>> getHiddenFilesWithLocalCopy(
+    Set<int> hiddenCollectionIds,
+    int ownerID,
+  ) async {
+    if (hiddenCollectionIds.isEmpty) {
+      return [];
+    }
+    final db = await instance.sqliteAsyncDB;
+    final inParam = hiddenCollectionIds.join(',');
+    final results = await db.getAll(
+      '''
+      SELECT * FROM $filesTable
+      WHERE $columnCollectionID IN ($inParam)
+      AND $columnOwnerID = ?
+      AND $columnLocalID IS NOT NULL AND $columnLocalID != ''
+      AND $columnUploadedFileID IS NOT NULL AND $columnUploadedFileID != -1
+      GROUP BY $columnUploadedFileID
+      ORDER BY $columnCreationTime DESC
+      ''',
+      [ownerID],
+    );
+    return convertToFiles(results);
+  }
+
+  /// Returns true if there are any hidden files with local copies on the device.
+  Future<bool> hasHiddenFilesWithLocalCopy(
+    Set<int> hiddenCollectionIds,
+    int ownerID,
+  ) async {
+    if (hiddenCollectionIds.isEmpty) {
+      return false;
+    }
+    final db = await instance.sqliteAsyncDB;
+    final inParam = hiddenCollectionIds.join(',');
+    final results = await db.getAll(
+      '''
+      SELECT 1 FROM $filesTable
+      WHERE $columnCollectionID IN ($inParam)
+      AND $columnOwnerID = ?
+      AND $columnLocalID IS NOT NULL AND $columnLocalID != ''
+      AND $columnUploadedFileID IS NOT NULL AND $columnUploadedFileID != -1
+      LIMIT 1
+      ''',
+      [ownerID],
+    );
+    return results.isNotEmpty;
+  }
+
+  /// Clears localID for all rows matching any of the given uploadedFileIDs.
+  /// This is used when deleting files from device to ensure all collection
+  /// entries for the same file have their localID cleared.
+  Future<void> clearLocalIDsForUploadedFileIDs(
+    List<int> uploadedFileIDs,
+  ) async {
+    if (uploadedFileIDs.isEmpty) {
+      return;
+    }
+    final db = await instance.sqliteAsyncDB;
+    final inParam = uploadedFileIDs.join(',');
+    await db.execute(
+      '''
+      UPDATE $filesTable
+      SET $columnLocalID = NULL
+      WHERE $columnUploadedFileID IN ($inParam)
+      ''',
+    );
   }
 
   ///Returns "columnName1 = ?, columnName2 = ?, ..."

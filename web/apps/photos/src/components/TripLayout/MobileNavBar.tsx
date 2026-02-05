@@ -3,6 +3,7 @@ import CheckIcon from "@mui/icons-material/Check";
 import FileDownloadOutlinedIcon from "@mui/icons-material/FileDownloadOutlined";
 import ShareIcon from "@mui/icons-material/Share";
 import { Box, Button, IconButton, styled } from "@mui/material";
+import { FeedIcon } from "components/Collections/CollectionHeader";
 import { EnteLogo } from "ente-base/components/EnteLogo";
 import { useIsTouchscreen } from "ente-base/components/utils/hooks";
 import type { PublicAlbumsCredentials } from "ente-base/http";
@@ -11,12 +12,13 @@ import { Notification } from "ente-new/photos/components/Notification";
 import { useJoinAlbum } from "hooks/useJoinAlbum";
 import { t } from "i18next";
 import { useState } from "react";
-import { getSignUpOrInstallURL } from "utils/public-album";
+import { getEnteURL } from "utils/public-album";
 
 interface MobileNavBarProps {
     onAddPhotos?: () => void;
     downloadAllFiles: () => void;
     enableDownload?: boolean;
+    onShowFeed?: () => void;
     collectionTitle?: string;
     publicCollection?: Collection;
     accessToken?: string;
@@ -28,6 +30,7 @@ export const MobileNavBar: React.FC<MobileNavBarProps> = ({
     onAddPhotos,
     downloadAllFiles,
     enableDownload,
+    onShowFeed,
     collectionTitle,
     publicCollection,
     accessToken,
@@ -66,22 +69,6 @@ export const MobileNavBar: React.FC<MobileNavBarProps> = ({
         }
     };
 
-    const handleSignUpOrInstall = () => {
-        if (typeof window !== "undefined") {
-            window.open(
-                getSignUpOrInstallURL(isTouchscreen),
-                "_blank",
-                "noopener",
-            );
-        }
-    };
-
-    const buttonText = enableJoin
-        ? t("join_album")
-        : isTouchscreen
-          ? t("install")
-          : t("sign_up");
-
     return (
         <>
             <MobileNavContainer>
@@ -93,6 +80,23 @@ export const MobileNavBar: React.FC<MobileNavBarProps> = ({
                     <MobileNavButton onClick={handleShare}>
                         <ShareIcon sx={{ fontSize: "15px" }} />
                     </MobileNavButton>
+
+                    {onShowFeed && (
+                        <MobileNavButton onClick={onShowFeed}>
+                            <Box
+                                sx={{
+                                    width: 16,
+                                    height: 16,
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    "& svg": { width: "100%", height: "100%" },
+                                }}
+                            >
+                                <FeedIcon />
+                            </Box>
+                        </MobileNavButton>
+                    )}
 
                     {onAddPhotos && (
                         <MobileNavButton onClick={onAddPhotos}>
@@ -110,17 +114,20 @@ export const MobileNavBar: React.FC<MobileNavBarProps> = ({
                         </MobileNavButton>
                     )}
 
-                    {(!onAddPhotos || enableJoin) && (
-                        <MobileSignUpButton
-                            onClick={
-                                enableJoin
-                                    ? handleJoinAlbum
-                                    : handleSignUpOrInstall
-                            }
-                        >
-                            {buttonText}
-                        </MobileSignUpButton>
-                    )}
+                    <MobileSignUpButton
+                        onClick={
+                            enableJoin
+                                ? handleJoinAlbum
+                                : () =>
+                                      window.open(
+                                          getEnteURL(isTouchscreen),
+                                          "_blank",
+                                          "noopener",
+                                      )
+                        }
+                    >
+                        {enableJoin ? t("join_album") : t("get_ente")}
+                    </MobileSignUpButton>
                 </ButtonGroup>
             </MobileNavContainer>
 

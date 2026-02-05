@@ -4,6 +4,7 @@ import 'dart:io';
 import "package:adaptive_theme/adaptive_theme.dart";
 import "package:computer/computer.dart";
 import 'package:ente_crypto/ente_crypto.dart';
+import "package:ente_pure_utils/ente_pure_utils.dart";
 import "package:ffmpeg_kit_flutter_new/ffmpeg_kit_config.dart";
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
@@ -24,7 +25,6 @@ import 'package:photos/core/errors.dart';
 import 'package:photos/core/network/network.dart';
 import "package:photos/db/ml/db.dart";
 import 'package:photos/ente_theme_data.dart';
-import "package:photos/extensions/stop_watch.dart";
 import "package:photos/l10n/l10n.dart";
 import "package:photos/service_locator.dart";
 import "package:photos/services/account/user_service.dart";
@@ -40,6 +40,7 @@ import 'package:photos/services/memory_lane/memory_lane_service.dart';
 import "package:photos/services/notification_service.dart";
 import 'package:photos/services/push_service.dart';
 import 'package:photos/services/search_service.dart';
+import 'package:photos/services/social_notification_coordinator.dart';
 import 'package:photos/services/sync/local_sync_service.dart';
 import 'package:photos/services/sync/remote_sync_service.dart';
 import "package:photos/services/sync/sync_service.dart";
@@ -198,6 +199,8 @@ Future<void> _runMinimally(String taskId, TimeLogger tlog) async {
     // Misc Services
     await UserService.instance.init();
     NotificationService.instance.init(prefs);
+    SocialNotificationCoordinator.instance.init(prefs);
+    await NotificationService.instance.initializeForBackground();
 
     // Begin Execution
     // only runs for android
@@ -255,6 +258,7 @@ Future<void> _init(bool isBackground, {String via = ''}) async {
     _logger.info("_logFGHeartBeatInfo done $tlog");
     unawaited(_scheduleHeartBeat(preferences, isBackground));
     NotificationService.instance.init(preferences);
+    await NotificationService.instance.initializeForBackground();
     AppLifecycleService.instance.init(preferences);
     if (isBackground) {
       AppLifecycleService.instance.onAppInBackground('init via: $via $tlog');
@@ -290,6 +294,7 @@ Future<void> _init(bool isBackground, {String via = ''}) async {
     _logger.info("CollectionsService init $tlog");
     await CollectionsService.instance.init(preferences);
     _logger.info("CollectionsService init done $tlog");
+    SocialNotificationCoordinator.instance.init(preferences);
 
     FavoritesService.instance.initFav().ignore();
     LocalFileUpdateService.instance.init(preferences);
@@ -339,7 +344,6 @@ Future<void> _init(bool isBackground, {String via = ''}) async {
     }
     EnteWakeLockService.instance.init(preferences);
     wrappedService.scheduleInitialLoad();
-    await localSettings.initSwipeToSelectDefault();
     logLocalSettings();
     initComplete = true;
     _stopHearBeat = true;
@@ -360,7 +364,6 @@ void logLocalSettings() {
     'Gallery grid size': localSettings.getPhotoGridSize(),
     'Video streaming enabled':
         VideoPreviewService.instance.isVideoStreamingEnabled,
-    'Swipe to select enabled': localSettings.isSwipeToSelectEnabled,
   };
 
   final formattedSettings =

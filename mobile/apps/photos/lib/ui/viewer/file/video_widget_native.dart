@@ -1,6 +1,7 @@
 import "dart:async";
 import "dart:io";
 
+import "package:ente_pure_utils/ente_pure_utils.dart";
 import "package:flutter/material.dart";
 import "package:logging/logging.dart";
 import "package:native_video_player/native_video_player.dart";
@@ -9,6 +10,7 @@ import "package:photos/core/event_bus.dart";
 import "package:photos/events/file_caption_updated_event.dart";
 import "package:photos/events/guest_view_event.dart";
 import "package:photos/events/pause_video_event.dart";
+import "package:photos/events/resume_video_event.dart";
 import "package:photos/events/seekbar_triggered_event.dart";
 import "package:photos/events/stream_switched_event.dart";
 import "package:photos/events/use_media_kit_for_video.dart";
@@ -31,17 +33,17 @@ import "package:photos/ui/viewer/file/native_video_player_controls/seek_bar.dart
 import "package:photos/ui/viewer/file/thumbnail_widget.dart";
 import "package:photos/ui/viewer/file/video_fit_mode.dart";
 import "package:photos/ui/viewer/file/video_stream_change.dart";
+import "package:photos/ui/viewer/file/zoomable_video_viewer.dart";
 import "package:photos/utils/dialog_util.dart";
 import "package:photos/utils/exif_util.dart";
 import "package:photos/utils/file_util.dart";
-import "package:photos/utils/standalone/date_time.dart";
-import "package:photos/utils/standalone/debouncer.dart";
 import "package:visibility_detector/visibility_detector.dart";
 
 class VideoWidgetNative extends StatefulWidget {
   final EnteFile file;
   final String? tagPrefix;
   final FullScreenRequestCallback? playbackCallback;
+  final Function(bool)? shouldDisableScroll;
   final bool isFromMemories;
   final void Function()? onStreamChange;
   final PlaylistData? playlistData;
@@ -52,6 +54,7 @@ class VideoWidgetNative extends StatefulWidget {
     this.file, {
     this.tagPrefix,
     this.playbackCallback,
+    this.shouldDisableScroll,
     this.isFromMemories = false,
     required this.onStreamChange,
     super.key,
@@ -70,6 +73,7 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
   static const verticalMargin = 64.0;
   final _progressNotifier = ValueNotifier<double?>(null);
   late StreamSubscription<PauseVideoEvent> pauseVideoSubscription;
+  late StreamSubscription<ResumeVideoEvent> resumeVideoSubscription;
   bool _isGuestView = false;
   late final StreamSubscription<GuestViewEvent> _guestViewEventSubscription;
   NativeVideoPlayerController? _controller;
@@ -99,14 +103,11 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
   double _scrubSecondsPerPixel = 0;
   int _scrubTargetMs = 0;
   int _scrubDurationMs = 0;
-  static const double _minZoomScale = 1.0;
-  static const double _maxZoomScale = 4.0;
   final Map<int, Offset> _activePointers = {};
-  double _zoomScale = _minZoomScale;
-  double _pinchStartScale = _minZoomScale;
-  double _pinchStartDistance = 0;
   bool _isPinching = false;
   VideoFitMode? _fitModeOverride;
+  final _transformationController = TransformationController();
+  bool _isZooming = false;
 
   @override
   void initState() {
@@ -115,6 +116,7 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
     );
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _transformationController.addListener(_onZoomChanged);
 
     if (widget.selectedPreview) {
       loadPreview();
@@ -124,6 +126,10 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
 
     pauseVideoSubscription = Bus.instance.on<PauseVideoEvent>().listen((event) {
       _controller?.pause();
+    });
+    resumeVideoSubscription =
+        Bus.instance.on<ResumeVideoEvent>().listen((event) {
+      _controller?.play();
     });
     _guestViewEventSubscription =
         Bus.instance.on<GuestViewEvent>().listen((event) {
@@ -255,6 +261,7 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
     _streamSwitchedSubscription?.cancel();
     _guestViewEventSubscription.cancel();
     pauseVideoSubscription.cancel();
+    resumeVideoSubscription.cancel();
     removeCallBack(widget.file);
     _progressNotifier.dispose();
     WidgetsBinding.instance.removeObserver(this);
@@ -266,9 +273,22 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
     _scrubDebouncer.cancelDebounceTimer();
     _scrubProgressNotifier.dispose();
     _captionUpdatedSubscription.cancel();
+    _transformationController.removeListener(_onZoomChanged);
+    _transformationController.dispose();
     EnteWakeLockService.instance
         .updateWakeLock(enable: false, wakeLockFor: WakeLockFor.videoPlayback);
     super.dispose();
+  }
+
+  void _onZoomChanged() {
+    final scale = _transformationController.value.getMaxScaleOnAxis();
+    final isZoomed = scale > kZoomThreshold;
+    if (_isZooming != isZoomed) {
+      setState(() {
+        _isZooming = isZoomed;
+      });
+      widget.shouldDisableScroll?.call(isZoomed);
+    }
   }
 
   @override
@@ -286,7 +306,7 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
           }
         },
         child: GestureDetector(
-          onVerticalDragUpdate: _isGuestView
+          onVerticalDragUpdate: _isGuestView || _isZooming
               ? null
               : (d) => {
                     if (d.delta.dy > dragSensitivity)
@@ -310,21 +330,24 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
                     key: const ValueKey("video_ready"),
                     children: [
                       Positioned.fill(
-                        child: _buildVideoViewport(fitMode),
+                        child: ZoomableVideoViewer(
+                          transformationController: _transformationController,
+                          shouldDisableScroll: widget.shouldDisableScroll,
+                          child: _buildVideoViewport(fitMode),
+                        ),
                       ),
                       ValueListenableBuilder(
                         valueListenable: _showControls,
                         builder: (context, showControls, _) {
-                          final enableScrub =
-                              showControls && !widget.isFromMemories;
+                          final enableScrub = !widget.isFromMemories;
                           return Listener(
-                            behavior: HitTestBehavior.opaque,
+                            behavior: HitTestBehavior.translucent,
                             onPointerDown: _handlePointerDown,
                             onPointerMove: _handlePointerMove,
                             onPointerUp: _handlePointerEnd,
                             onPointerCancel: _handlePointerEnd,
                             child: GestureDetector(
-                              behavior: HitTestBehavior.opaque,
+                              behavior: HitTestBehavior.translucent,
                               onTap: widget.isFromMemories
                                   ? null
                                   : () {
@@ -589,9 +612,7 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
   }
 
   void _resetZoom() {
-    _zoomScale = _minZoomScale;
-    _pinchStartScale = _minZoomScale;
-    _pinchStartDistance = 0;
+    _transformationController.value = Matrix4.identity();
     _isPinching = false;
     _activePointers.clear();
   }
@@ -603,8 +624,6 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
         _onScrubCancel();
       }
       _isPinching = true;
-      _pinchStartDistance = _pointerDistance();
-      _pinchStartScale = _zoomScale;
       _debouncer.cancelDebounceTimer();
       _showControls.value = true;
     }
@@ -613,36 +632,13 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
   void _handlePointerMove(PointerMoveEvent event) {
     if (!_activePointers.containsKey(event.pointer)) return;
     _activePointers[event.pointer] = event.position;
-    if (!_isPinching || _activePointers.length < 2) return;
-    if (_pinchStartDistance <= 0) return;
-    final distance = _pointerDistance();
-    if (distance <= 0) return;
-    final scale = distance / _pinchStartDistance;
-    final nextScale =
-        (_pinchStartScale * scale).clamp(_minZoomScale, _maxZoomScale);
-    if (nextScale == _zoomScale) return;
-    setState(() {
-      _zoomScale = nextScale;
-    });
   }
 
   void _handlePointerEnd(PointerEvent event) {
     _activePointers.remove(event.pointer);
     if (_activePointers.length < 2) {
       _isPinching = false;
-      _pinchStartDistance = 0;
-      if (_zoomScale <= _minZoomScale + 0.01 && _zoomScale != _minZoomScale) {
-        setState(() {
-          _zoomScale = _minZoomScale;
-        });
-      }
     }
-  }
-
-  double _pointerDistance() {
-    if (_activePointers.length < 2) return 0;
-    final points = _activePointers.values.take(2).toList();
-    return (points[0] - points[1]).distance;
   }
 
   void _onScrubStart(DragStartDetails _) {
@@ -913,18 +909,14 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
             break;
         }
         return ClipRect(
-          child: Transform.scale(
-            scale: _zoomScale,
+          child: OverflowBox(
             alignment: Alignment.center,
-            child: OverflowBox(
-              alignment: Alignment.center,
-              minWidth: targetWidth,
-              maxWidth: targetWidth,
-              minHeight: targetHeight,
-              maxHeight: targetHeight,
-              child: NativeVideoPlayerView(
-                onViewReady: _initializeController,
-              ),
+            minWidth: targetWidth,
+            maxWidth: targetWidth,
+            minHeight: targetHeight,
+            maxHeight: targetHeight,
+            child: NativeVideoPlayerView(
+              onViewReady: _initializeController,
             ),
           ),
         );

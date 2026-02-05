@@ -147,8 +147,8 @@ abstract class BaseInfoPageState<T extends InfoData, W extends BaseInfoPage<T>>
               selectedCollectionIds: _selectedCollectionIds,
               onToggleCollection: _onToggleCollection,
               onCollectionsUpdated: _onCollectionsUpdated,
-              titleWidget:
-                  showCollectionSelectionTitle ? null : const SizedBox.shrink(),
+              title:
+                  showCollectionSelectionTitle ? context.l10n.collections : '',
             ),
           ],
         ),
@@ -667,7 +667,7 @@ abstract class BaseInfoPageState<T extends InfoData, W extends BaseInfoPage<T>>
                   FocusScope.of(context).unfocus();
                 }
               : null,
-          behavior: HitTestBehavior.opaque,
+          behavior: HitTestBehavior.translucent,
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 16.0),
             child: Form(

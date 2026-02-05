@@ -2,6 +2,7 @@ import "dart:async";
 import "dart:math" show Random;
 import "dart:typed_data" show Float32List;
 
+import "package:ente_pure_utils/ente_pure_utils.dart";
 import "package:flutter/foundation.dart" show kDebugMode;
 import 'package:flutter/material.dart';
 import "package:flutter_rust_bridge/flutter_rust_bridge.dart";
@@ -13,7 +14,6 @@ import "package:photos/core/event_bus.dart";
 import "package:photos/db/ml/clip_vector_db.dart";
 import "package:photos/db/ml/db.dart";
 import "package:photos/events/people_changed_event.dart";
-import "package:photos/extensions/stop_watch.dart";
 import "package:photos/generated/protos/ente/common/vector.pb.dart";
 import "package:photos/models/ml/face/person.dart";
 import "package:photos/models/search/generic_search_result.dart";
@@ -625,12 +625,12 @@ class _MLDebugSectionWidgetState extends State<MLDebugSectionWidget> {
             },
           ),
           trailingWidget: ToggleSwitchWidget(
-            value: () => flagService.hasGrantedMLConsent,
+            value: () => hasGrantedMLConsent,
             onChanged: () async {
               try {
-                final oldMlConsent = flagService.hasGrantedMLConsent;
+                final oldMlConsent = hasGrantedMLConsent;
                 final mlConsent = !oldMlConsent;
-                await flagService.setMLConsent(mlConsent);
+                await setMLConsent(mlConsent);
                 logger.info('ML consent turned ${mlConsent ? 'on' : 'off'}');
                 if (!mlConsent) {
                   MLService.instance.pauseIndexingAndClustering();
@@ -769,7 +769,11 @@ class _MLDebugSectionWidgetState extends State<MLDebugSectionWidget> {
           onTap: () async {
             try {
               MLService.instance.debugIndexingDisabled = false;
-              unawaited(MLService.instance.fetchAndIndexAllImages());
+              unawaited(
+                MLService.instance.fetchAndIndexAllImages(
+                  mode: isOfflineMode ? MLMode.offline : MLMode.online,
+                ),
+              );
             } catch (e, s) {
               logger.warning('indexing failed ', e, s);
               await showGenericErrorDialog(context: context, error: e);

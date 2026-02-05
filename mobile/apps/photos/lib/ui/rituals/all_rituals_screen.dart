@@ -1,4 +1,7 @@
+import "dart:async";
+
 import "package:ente_icons/ente_icons.dart";
+import "package:ente_pure_utils/ente_pure_utils.dart";
 import "package:flutter/material.dart";
 import "package:hugeicons/hugeicons.dart";
 import "package:photos/l10n/l10n.dart";
@@ -11,8 +14,8 @@ import "package:photos/ui/rituals/ritual_day_thumbnail.dart";
 import "package:photos/ui/rituals/ritual_editor_dialog.dart";
 import "package:photos/ui/rituals/ritual_emoji_icon.dart";
 import "package:photos/ui/rituals/ritual_page.dart";
+import "package:photos/ui/rituals/ritual_privacy.dart";
 import "package:photos/ui/rituals/start_new_ritual_card.dart";
-import "package:photos/utils/navigation_util.dart";
 
 class AllRitualsScreen extends StatelessWidget {
   const AllRitualsScreen({super.key, this.ritual});
@@ -127,13 +130,13 @@ class _RitualOverviewCard extends StatelessWidget {
     final completions = [
       for (final day in days) progress?.hasCompleted(day) ?? false,
     ];
+    final isHiddenRitual = isRitualAlbumHidden(ritual);
 
     return GestureDetector(
-      onTap: () {
-        routeToPage(
-          context,
-          RitualPage(ritualId: ritual.id),
-        );
+      onTap: () async {
+        final canOpen = await requestHiddenRitualAccess(context, ritual);
+        if (!context.mounted || !canOpen) return;
+        unawaited(routeToPage(context, RitualPage(ritualId: ritual.id)));
       },
       onLongPress: () async {
         final action = await showModalBottomSheet<String>(
@@ -230,6 +233,7 @@ class _RitualOverviewCard extends StatelessWidget {
                                   : completions[index + 1],
                               index: index,
                               showFuturePreview: showFuturePreview,
+                              isHiddenRitual: isHiddenRitual,
                             ),
                           ),
                         ),
@@ -253,6 +257,7 @@ class _RitualOverviewCard extends StatelessWidget {
     required bool? nextCompleted,
     required int index,
     required bool showFuturePreview,
+    required bool isHiddenRitual,
   }) {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
@@ -264,6 +269,10 @@ class _RitualOverviewCard extends StatelessWidget {
         progress?.recentFileCountsByDay[dayKey] ?? (completed ? 1 : 0);
     final isToday = _isSameDay(day, today);
     final isYesterday = _isSameDay(day, yesterday);
+    final shouldShowCamera =
+        isToday && !completed && file == null && count == 0;
+    final shouldHidePhoto =
+        isHiddenRitual && !shouldShowCamera && !day.isAfter(today);
     final fadePhoto =
         completed && nextCompleted == false && !isYesterday && !isToday;
     final rotation = switch (index % 4) {
@@ -272,6 +281,14 @@ class _RitualOverviewCard extends StatelessWidget {
       2 => -0.08,
       _ => 0.08,
     };
+
+    if (shouldHidePhoto) {
+      return RitualDayThumbnail(
+        day: day,
+        variant: RitualDayThumbnailVariant.hidden,
+        width: tileWidth,
+      );
+    }
 
     final variant = completed
         ? RitualDayThumbnailVariant.photo
@@ -393,15 +410,13 @@ List<DateTime> _lastScheduledDaysInclusive({
   required int count,
 }) {
   final daysOfWeek = ritual.daysOfWeek;
-  if (daysOfWeek.length != 7 || !daysOfWeek.any((enabled) => enabled)) {
-    return const [];
-  }
+  if (daysOfWeek.length != 7) return const [];
 
   final result = <DateTime>[];
   for (int offset = 0; result.length < count && offset < 366; offset++) {
     final day = todayMidnight.subtract(Duration(days: offset));
     final weekdayIndex = day.weekday % 7; // Sunday-first
-    if (!daysOfWeek[weekdayIndex]) continue;
+    if (!_isScheduledDay(daysOfWeek, weekdayIndex)) continue;
     result.add(day);
   }
   return result.reversed.toList(growable: false);
@@ -413,15 +428,13 @@ List<DateTime> _nextScheduledDaysInclusive({
   required int count,
 }) {
   final daysOfWeek = ritual.daysOfWeek;
-  if (daysOfWeek.length != 7 || !daysOfWeek.any((enabled) => enabled)) {
-    return const [];
-  }
+  if (daysOfWeek.length != 7) return const [];
 
   final result = <DateTime>[];
   for (int offset = 0; result.length < count && offset < 366; offset++) {
     final day = todayMidnight.add(Duration(days: offset));
     final weekdayIndex = day.weekday % 7; // Sunday-first
-    if (!daysOfWeek[weekdayIndex]) continue;
+    if (!_isScheduledDay(daysOfWeek, weekdayIndex)) continue;
     result.add(day);
   }
   return result.toList(growable: false);
@@ -508,19 +521,31 @@ int _scheduledSlotsSinceCreation({
   if (todayMidnight.isBefore(createdDayMidnight)) return 0;
 
   final daysOfWeek = ritual.daysOfWeek;
-  if (daysOfWeek.length != 7 || !daysOfWeek.any((enabled) => enabled)) {
-    return 0;
-  }
+  if (daysOfWeek.length != 7) return 0;
 
   int slots = 0;
   for (int offset = 1; slots < maxSlots && offset < 366; offset++) {
     final day = todayMidnight.subtract(Duration(days: offset));
     if (day.isBefore(createdDayMidnight)) break;
     final weekdayIndex = day.weekday % 7; // Sunday-first
-    if (!daysOfWeek[weekdayIndex]) continue;
+    if (!_isScheduledDay(daysOfWeek, weekdayIndex)) continue;
     slots += 1;
   }
   return slots;
+}
+
+bool _hasAnyEnabledRitualDays(List<bool> daysOfWeek) {
+  if (daysOfWeek.length != 7) return false;
+  for (final enabled in daysOfWeek) {
+    if (enabled) return true;
+  }
+  return false;
+}
+
+bool _isScheduledDay(List<bool> daysOfWeek, int dayIndex) {
+  if (daysOfWeek.length != 7) return false;
+  if (!_hasAnyEnabledRitualDays(daysOfWeek)) return true;
+  return daysOfWeek[dayIndex];
 }
 
 const _tightTextHeightBehavior = TextHeightBehavior(

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:ente_pure_utils/ente_pure_utils.dart';
 import "package:flutter/cupertino.dart";
 import "package:flutter/foundation.dart";
 import 'package:flutter/material.dart';
@@ -60,8 +61,6 @@ import "package:photos/ui/viewer/location/edit_location_sheet.dart";
 import 'package:photos/utils/dialog_util.dart';
 import "package:photos/utils/file_download_util.dart";
 import 'package:photos/utils/magic_util.dart';
-import 'package:photos/utils/navigation_util.dart';
-import 'package:photos/utils/standalone/data.dart';
 import "package:uuid/uuid.dart";
 
 class GalleryAppBarWidget extends StatefulWidget {
@@ -95,6 +94,7 @@ enum AlbumPopupAction {
   ownedArchive,
   sharedArchive,
   ownedHide,
+  sharedHide,
   playOnTv,
   autoAddPhotos,
   sort,
@@ -572,7 +572,7 @@ class _GalleryAppBarWidgetState extends State<GalleryAppBarWidget> {
           context.l10n.playOnTv,
           icon: Icons.tv_outlined,
         ),
-      if (flagService.hasGrantedMLConsent &&
+      if (hasGrantedMLConsent &&
           (widget.collection?.canAutoAdd(userId) ?? false))
         EntePopupMenuItemAsync(
           (value) => (value?[widget.collection!.id]?.personIDs.isEmpty ?? true)
@@ -622,6 +622,16 @@ class _GalleryAppBarWidgetState extends State<GalleryAppBarWidget> {
           icon: widget.collection!.hasShareeArchived()
               ? Icons.unarchive
               : Icons.archive_outlined,
+        ),
+      if (galleryType == GalleryType.sharedCollection)
+        EntePopupMenuItem(
+          widget.collection!.hasShareeHidden()
+              ? AppLocalizations.of(context).unhide
+              : AppLocalizations.of(context).hide,
+          value: AlbumPopupAction.sharedHide,
+          icon: widget.collection!.hasShareeHidden()
+              ? Icons.visibility_outlined
+              : Icons.visibility_off_outlined,
         ),
       if (galleryType == GalleryType.sharedCollection)
         EntePopupMenuItem(
@@ -704,6 +714,23 @@ class _GalleryAppBarWidgetState extends State<GalleryAppBarWidget> {
                 hasShareeArchived ? archiveVisibility : visibleVisibility;
             final int newVisiblity =
                 hasShareeArchived ? visibleVisibility : archiveVisibility;
+
+            await changeCollectionVisibility(
+              context,
+              collection: widget.collection!,
+              newVisibility: newVisiblity,
+              prevVisibility: prevVisiblity,
+              isOwner: false,
+            );
+            if (mounted) {
+              setState(() {});
+            }
+          } else if (value == AlbumPopupAction.sharedHide) {
+            final hasShareeHidden = widget.collection!.hasShareeHidden();
+            final int prevVisiblity =
+                hasShareeHidden ? hiddenVisibility : visibleVisibility;
+            final int newVisiblity =
+                hasShareeHidden ? visibleVisibility : hiddenVisibility;
 
             await changeCollectionVisibility(
               context,
@@ -808,9 +835,9 @@ class _GalleryAppBarWidgetState extends State<GalleryAppBarWidget> {
   }
 
   Future<void> showOnMap() async {
-    if (!flagService.mapEnabled) {
+    if (!mapEnabled) {
       try {
-        await flagService.setMapEnabled(true);
+        await setMapEnabled(true);
       } catch (e) {
         showShortToast(
           context,

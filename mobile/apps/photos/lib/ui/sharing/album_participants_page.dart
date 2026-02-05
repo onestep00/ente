@@ -1,4 +1,5 @@
 import 'package:collection/collection.dart';
+import 'package:ente_pure_utils/ente_pure_utils.dart';
 import 'package:flutter/material.dart';
 import 'package:photos/core/configuration.dart';
 import "package:photos/extensions/user_extension.dart";
@@ -17,7 +18,6 @@ import "package:photos/ui/sharing/add_participant_page.dart";
 import 'package:photos/ui/sharing/manage_album_participant.dart';
 import 'package:photos/ui/sharing/public_link_enabled_actions_widget.dart';
 import 'package:photos/ui/sharing/user_avator_widget.dart';
-import 'package:photos/utils/navigation_util.dart';
 
 class AlbumParticipantsPage extends StatefulWidget {
   final Collection collection;
@@ -218,7 +218,7 @@ class _AlbumParticipantsPageState extends State<AlbumParticipantsPage> {
                             leadingIconSize: 24.0,
                             leadingIconWidget: UserAvatarWidget(
                               currentUser,
-                              type: AvatarType.mini,
+                              type: AvatarType.md,
                               currentUserID: currentUserID,
                             ),
                             menuItemColor: colorScheme.fillFaint,
@@ -301,7 +301,7 @@ class _AlbumParticipantsPageState extends State<AlbumParticipantsPage> {
                           leadingIconSize: 24.0,
                           leadingIconWidget: UserAvatarWidget(
                             currentUser,
-                            type: AvatarType.mini,
+                            type: AvatarType.md,
                             currentUserID: currentUserID,
                           ),
                           menuItemColor: colorScheme.fillFaint,
@@ -382,7 +382,7 @@ class _AlbumParticipantsPageState extends State<AlbumParticipantsPage> {
                           leadingIconSize: 24.0,
                           leadingIconWidget: UserAvatarWidget(
                             currentUser,
-                            type: AvatarType.mini,
+                            type: AvatarType.md,
                             currentUserID: currentUserID,
                           ),
                           menuItemColor: colorScheme.fillFaint,

@@ -1,34 +1,34 @@
-import 'dart:async';
-import 'dart:io';
+import "dart:async";
+import "dart:io";
 
-import 'package:flutter/foundation.dart';
-import 'package:logging/logging.dart';
-import 'package:photo_manager/photo_manager.dart';
+import "package:ente_pure_utils/ente_pure_utils.dart";
+import "package:flutter/foundation.dart";
+import "package:logging/logging.dart";
+import "package:photo_manager/photo_manager.dart";
 import "package:photos/core/cache/lru_map.dart";
-import 'package:photos/core/configuration.dart';
+import "package:photos/core/configuration.dart";
 import "package:photos/core/errors.dart";
-import 'package:photos/core/event_bus.dart';
+import "package:photos/core/event_bus.dart";
+import "package:photos/core/user_config.dart";
 import "package:photos/db/common/conflict_algo.dart";
-import 'package:photos/db/device_files_db.dart';
-import 'package:photos/db/file_updation_db.dart';
-import 'package:photos/db/files_db.dart';
-import 'package:photos/events/backup_folders_updated_event.dart';
-import 'package:photos/events/local_photos_updated_event.dart';
+import "package:photos/db/device_files_db.dart";
+import "package:photos/db/file_updation_db.dart";
+import "package:photos/db/files_db.dart";
+import "package:photos/events/backup_folders_updated_event.dart";
+import "package:photos/events/local_photos_updated_event.dart";
 import "package:photos/events/permission_granted_event.dart";
-import 'package:photos/events/sync_status_update_event.dart';
-import 'package:photos/extensions/stop_watch.dart';
-import 'package:photos/models/file/file.dart';
+import "package:photos/events/sync_status_update_event.dart";
+import "package:photos/models/file/file.dart";
 import "package:photos/models/ignored_file.dart";
 import "package:photos/service_locator.dart";
-import 'package:photos/services/app_lifecycle_service.dart';
+import "package:photos/services/app_lifecycle_service.dart";
 import "package:photos/services/ignored_files_service.dart";
 import "package:photos/services/sync/import/diff.dart";
 import "package:photos/services/sync/import/local_assets.dart";
 import "package:photos/services/sync/import/model.dart";
-import "package:photos/utils/standalone/debouncer.dart";
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:synchronized/synchronized.dart';
-import 'package:tuple/tuple.dart';
+import "package:shared_preferences/shared_preferences.dart";
+import "package:synchronized/synchronized.dart";
+import "package:tuple/tuple.dart";
 
 // This map is used to track if a iOS origin file is being fetched for uploading
 // or ML processing. In such cases, we want to ignore these files if they come in response
@@ -86,7 +86,7 @@ class LocalSyncService {
       return _existingSync!.future;
     }
     _existingSync = Completer<void>();
-    final int ownerID = Configuration.instance.getUserID()!;
+    final int ownerID = Configuration.instance.getUserIDV2();
 
     // We use a lock to prevent synchronisation to occur while it is downloading
     // as this introduces wrong entry in FilesDB due to race condition
@@ -165,12 +165,15 @@ class LocalSyncService {
 
   Future<bool> syncAll() async {
     if (!Configuration.instance.isLoggedIn()) {
-      _logger.warning("syncCall called when user is not logged in");
-      return false;
+      if(!isOfflineMode) {
+        _logger.warning("syncAll called when user is not logged in");
+        return false;
+      }
     }
     final stopwatch = EnteWatch("localSyncAll")..start();
 
-    final localAssets = await getAllLocalAssets();
+    final localAssets =
+        await getAllLocalAssets(needsTitle: isOfflineMode ? true : null);
     _logger.info(
       "Loading allLocalAssets ${localAssets.length} took ${stopwatch.elapsedMilliseconds}ms ",
     );
@@ -178,7 +181,7 @@ class LocalSyncService {
     _logger.info(
       "refreshDeviceFolderCountAndCover + allLocalAssets took ${stopwatch.elapsedMilliseconds}ms ",
     );
-    final int ownerID = Configuration.instance.getUserID()!;
+    final int ownerID = Configuration.instance.getUserIDV2();
     final existingLocalFileIDs = await _db.getExistingLocalFileIDs(ownerID);
     final Map<String, Set<String>> pathToLocalIDs =
         await _db.getDevicePathIDToLocalIDMap();
@@ -318,16 +321,17 @@ class LocalSyncService {
         conflictAlgorithm: SqliteAsyncConflictAlgorithm.ignore,
       );
       _logger.info('Inserted ${files.length} out of ${allFiles.length} files');
-      _checkAndFireLocalAssetUpdateEvent(allFiles, files.isNotEmpty);
+      _checkAndFireLocalAssetUpdateEvent(allFiles, files);
     }
     await _prefs.setInt(kDbUpdationTimeKey, toTime);
   }
 
   void _checkAndFireLocalAssetUpdateEvent(
     List<EnteFile> allFiles,
-    bool discoveredNewFiles,
+    List<EnteFile> newlyInsertedFiles,
   ) {
     if (allFiles.isEmpty) return;
+    final bool discoveredNewFiles = newlyInsertedFiles.isNotEmpty;
     if (!discoveredNewFiles) {
       allFiles.removeWhere(
         (file) =>
@@ -338,8 +342,24 @@ class LocalSyncService {
         return;
       }
     }
+
+    // Check if any NEWLY INSERTED files were created in the last 7 days
+    bool hasRecentNewLocalDiscovery = false;
+    if (discoveredNewFiles) {
+      final sevenDaysAgo = DateTime.now()
+          .subtract(const Duration(days: 7))
+          .microsecondsSinceEpoch;
+      hasRecentNewLocalDiscovery = newlyInsertedFiles.any(
+        (file) => (file.creationTime ?? 0) > sevenDaysAgo,
+      );
+    }
+
     Bus.instance.fire(
-      LocalPhotosUpdatedEvent(allFiles, source: "loadedPhoto"),
+      LocalPhotosUpdatedEvent(
+        allFiles,
+        source: "loadedPhoto",
+        hasRecentNewLocalDiscovery: hasRecentNewLocalDiscovery,
+      ),
     );
   }
 
