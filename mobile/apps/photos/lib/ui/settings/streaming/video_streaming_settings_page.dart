@@ -12,6 +12,8 @@ import "package:photos/theme/ente_theme.dart";
 import "package:photos/ui/common/loading_widget.dart";
 import "package:photos/ui/common/web_page.dart";
 import "package:photos/ui/components/buttons/button_widget.dart";
+import "package:photos/ui/components/captioned_text_widget.dart";
+import "package:photos/ui/components/menu_item_widget/menu_item_widget.dart";
 import "package:photos/ui/components/menu_item_widget/menu_item_widget_new.dart";
 import "package:photos/ui/components/models/button_type.dart";
 import "package:photos/ui/components/toggle_switch_widget.dart";
