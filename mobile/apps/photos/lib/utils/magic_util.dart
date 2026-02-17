@@ -112,9 +112,17 @@ Future<void> changeSortOrder(
   BuildContext context,
   Collection collection,
   bool sortedInAscOrder,
+  {CollectionSortBy? sortBy}
 ) async {
   try {
     final Map<String, dynamic> update = {"asc": sortedInAscOrder};
+    if (sortBy != null) {
+      update[collectionSortByKey] = sortBy == CollectionSortBy.creationTime
+          ? "creationTime"
+          : sortBy == CollectionSortBy.duration
+              ? "duration"
+              : "fileSize";
+    }
     await CollectionsService.instance
         .updatePublicMagicMetadata(collection, update);
     Bus.instance.fire(

@@ -12,6 +12,32 @@ const subTypeKey = 'subType';
 const muteKey = "mute";
 
 const orderKey = "order";
+const collectionSortByKey = "sortBy";
+
+enum CollectionSortBy {
+  creationTime,
+  duration,
+  fileSize,
+}
+
+const _collectionSortByToString = {
+  CollectionSortBy.creationTime: "creationTime",
+  CollectionSortBy.duration: "duration",
+  CollectionSortBy.fileSize: "fileSize",
+};
+
+CollectionSortBy? _toCollectionSortBy(dynamic value) {
+  if (value == null) {
+    return null;
+  }
+  if (value is CollectionSortBy) {
+    return value;
+  }
+  return _collectionSortByToString.keys.firstWhere(
+    (key) => _collectionSortByToString[key] == value.toString(),
+    orElse: () => CollectionSortBy.creationTime,
+  );
+}
 
 class CollectionMagicMetadata {
   // 0 -> visible
@@ -62,6 +88,7 @@ class CollectionMagicMetadata {
 class CollectionPubMagicMetadata {
   // sort order while showing collection
   bool? asc;
+  CollectionSortBy? sortBy;
 
   // cover photo id for the collection
   int? coverID;
@@ -69,10 +96,13 @@ class CollectionPubMagicMetadata {
   // layout for public link sharing (grouped, continuous, trip)
   String? layout;
 
-  CollectionPubMagicMetadata({this.asc, this.coverID, this.layout});
+  CollectionPubMagicMetadata({this.asc, this.sortBy, this.coverID, this.layout});
 
   Map<String, dynamic> toJson() {
     final Map<String, dynamic> result = {"asc": asc ?? false};
+    if (sortBy != null) {
+      result[collectionSortByKey] = _collectionSortByToString[sortBy]!;
+    }
     if (coverID != null) {
       result["coverID"] = coverID!;
     }
@@ -92,10 +122,14 @@ class CollectionPubMagicMetadata {
     if (map == null) return null;
     return CollectionPubMagicMetadata(
       asc: map["asc"] as bool?,
+      sortBy: _toCollectionSortBy(map[collectionSortByKey]),
       coverID: map["coverID"],
       layout: map["layout"] as String? ?? "grouped",
     );
   }
+
+  CollectionSortBy get resolvedSortBy =>
+      sortBy ?? CollectionSortBy.creationTime;
 }
 
 class ShareeMagicMetadata {

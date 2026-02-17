@@ -13,7 +13,9 @@ import "package:photos/l10n/l10n.dart";
 import "package:photos/models/collection/collection_items.dart";
 import "package:photos/models/file/file.dart";
 import "package:photos/models/file_load_result.dart";
+import "package:photos/models/file/file_type.dart";
 import "package:photos/models/gallery_type.dart";
+import "package:photos/models/metadata/collection_magic.dart";
 import "package:photos/models/selected_files.dart";
 import "package:photos/services/collections_service.dart";
 import "package:photos/services/sync/remote_sync_service.dart";
@@ -131,8 +133,52 @@ class _SharedPublicCollectionPageState
 
     final gallery = Gallery(
       asyncLoader: (creationStartTime, creationEndTime, {limit, asc}) async {
+        final sortBy = widget.c.collection.pubMagicMetadata.resolvedSortBy;
+        final sortAsc = widget.c.collection.pubMagicMetadata.asc ?? false;
+        const videoFileType = FileType.video;
+
+        int compareForSort(int a, int b) {
+          return sortAsc ? a.compareTo(b) : b.compareTo(a);
+        }
+
         widget.files!.sort(
-          (a, b) => b.creationTime!.compareTo(a.creationTime!),
+          (a, b) {
+            if (sortBy != CollectionSortBy.creationTime) {
+              final bool isAVideo = a.fileType == videoFileType;
+              final bool isBVideo = b.fileType == videoFileType;
+              if (isAVideo != isBVideo) {
+                return isAVideo ? -1 : 1;
+              }
+            }
+
+            if (sortBy == CollectionSortBy.duration) {
+              final int compareDuration = compareForSort(
+                a.duration ?? 0,
+                b.duration ?? 0,
+              );
+              if (compareDuration != 0) {
+                return compareDuration;
+              }
+            } else if (sortBy == CollectionSortBy.fileSize) {
+              final int compareFileSize = compareForSort(
+                a.fileSize ?? 0,
+                b.fileSize ?? 0,
+              );
+              if (compareFileSize != 0) {
+                return compareFileSize;
+              }
+            }
+
+            final int compareCreation = compareForSort(
+              a.creationTime ?? 0,
+              b.creationTime ?? 0,
+            );
+            if (compareCreation != 0) {
+              return compareCreation;
+            }
+
+            return compareForSort(a.modificationTime ?? 0, b.modificationTime ?? 0);
+          },
         );
 
         return FileLoadResult(widget.files!, false);

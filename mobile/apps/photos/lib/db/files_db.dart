@@ -15,6 +15,7 @@ import 'package:photos/models/file_load_result.dart';
 import 'package:photos/models/freeable_space_info.dart';
 import 'package:photos/models/location/location.dart';
 import "package:photos/models/metadata/common_keys.dart";
+import "package:photos/models/metadata/collection_magic.dart";
 import "package:photos/services/filter/db_filters.dart";
 import 'package:photos/utils/file_uploader_util.dart';
 import 'package:sqlite_async/sqlite_async.dart';
@@ -687,9 +688,13 @@ class FilesDB with SqlDbBase {
     int visibility = visibleVisibility,
     DBFilterOptions? filterOptions,
     bool applyOwnerCheck = false,
+    CollectionSortBy sortBy = CollectionSortBy.creationTime,
   }) async {
     final stopWatch = EnteWatch('getAllPendingOrUploadedFiles')..start();
-    final order = (asc ?? false ? 'ASC' : 'DESC');
+    final orderClause = _buildOrderByClause(
+      sortBy: sortBy,
+      asc: asc ?? false,
+    );
 
     final subQueries = <String>[];
     late List<Object?>? args;
@@ -715,7 +720,7 @@ class FilesDB with SqlDbBase {
     }
 
     subQueries.add(
-      ' ORDER BY $columnCreationTime $order, $columnModificationTime $order',
+      ' ORDER BY $orderClause',
     );
 
     if (limit != null) {
@@ -742,10 +747,14 @@ class FilesDB with SqlDbBase {
     int ownerID, {
     int? limit,
     bool? asc,
+    CollectionSortBy sortBy = CollectionSortBy.creationTime,
     required DBFilterOptions filterOptions,
   }) async {
     final db = await instance.sqliteAsyncDB;
-    final order = (asc ?? false ? 'ASC' : 'DESC');
+    final orderClause = _buildOrderByClause(
+      sortBy: sortBy,
+      asc: asc ?? false,
+    );
     final args = [startTime, endTime, visibleVisibility];
     final subQueries = <String>[];
 
@@ -759,7 +768,7 @@ class FilesDB with SqlDbBase {
     }
 
     subQueries.add(
-      ' ORDER BY $columnCreationTime $order, $columnModificationTime $order',
+      ' ORDER BY $orderClause',
     );
 
     if (limit != null) {
@@ -803,11 +812,15 @@ class FilesDB with SqlDbBase {
     int? limit,
     bool? asc,
     int visibility = visibleVisibility,
+    CollectionSortBy sortBy = CollectionSortBy.creationTime,
   }) async {
     final db = await instance.sqliteAsyncDB;
-    final order = (asc ?? false ? 'ASC' : 'DESC');
+    final orderClause = _buildOrderByClause(
+      sortBy: sortBy,
+      asc: asc ?? false,
+    );
     String query =
-        'SELECT * FROM $filesTable WHERE $columnCollectionID = ? AND $columnCreationTime >= ? AND $columnCreationTime <= ? ORDER BY $columnCreationTime $order, $columnModificationTime $order';
+        'SELECT * FROM $filesTable WHERE $columnCollectionID = ? AND $columnCreationTime >= ? AND $columnCreationTime <= ? ORDER BY $orderClause';
     final List<Object> args = [collectionID, startTime, endTime];
     if (limit != null) {
       query += ' LIMIT ?';
@@ -819,6 +832,23 @@ class FilesDB with SqlDbBase {
     );
     final files = convertToFiles(results);
     return FileLoadResult(files, files.length == limit);
+  }
+
+  String _buildOrderByClause({
+    required CollectionSortBy sortBy,
+    required bool asc,
+  }) {
+    final order = (asc ? 'ASC' : 'DESC');
+    switch (sortBy) {
+      case CollectionSortBy.duration:
+        return 'CASE WHEN $columnFileType = ${getInt(FileType.video)} THEN 0 ELSE 1 END ASC, '
+            '$columnDuration $order, $columnCreationTime $order, $columnModificationTime $order';
+      case CollectionSortBy.fileSize:
+        return 'CASE WHEN $columnFileType = ${getInt(FileType.video)} THEN 0 ELSE 1 END ASC, '
+            'COALESCE($columnFileSize, 0) $order, $columnCreationTime $order, $columnModificationTime $order';
+      case CollectionSortBy.creationTime:
+        return '$columnCreationTime $order, $columnModificationTime $order';
+    }
   }
 
   Future<List<EnteFile>> getAllFilesCollection(int collectionID) async {

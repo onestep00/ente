@@ -48,6 +48,7 @@ class UnCategorizedPage extends StatelessWidget {
           creationEndTime,
           limit: limit,
           asc: asc,
+          sortBy: collection.pubMagicMetadata.resolvedSortBy,
         );
         // hide ignored files from home page UI
         final ignoredIDs =

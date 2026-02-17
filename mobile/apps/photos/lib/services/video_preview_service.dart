@@ -847,6 +847,7 @@ class VideoPreviewService {
 
       final codec = videoData["codec_name"]?.toString().toLowerCase();
       final isH264 = codec?.contains("h264") ?? false;
+      final hasBFrames = int.tryParse(videoData["has_b_frames"]?.toString() ?? "");
 
       final Duration? sourceDuration = _currentEncodingDuration;
       final double? sourceBitrateKbps =
@@ -910,12 +911,14 @@ class VideoPreviewService {
       final String hardwareKeyframeArgs = _buildKeyframeArgs(
         gopSize: gopSize,
         intervalSeconds: _keyframeIntervalSeconds,
-        includeMinKeyint: false,
+        disableSceneCut: true,
+        includeMinKeyint: true,
       );
       final reencodeVideo = !isH264 ||
           exceedsBitrate ||
           needsScale ||
           applyFPS ||
+          (Platform.isAndroid && (hasBFrames ?? 0) > 0) ||
           needsTonemap;
       final rescaleVideo = needsScale;
 

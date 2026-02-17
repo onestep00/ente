@@ -27,6 +27,7 @@ import 'package:photos/models/device_collection.dart';
 import "package:photos/models/file/file.dart";
 import 'package:photos/models/freeable_space_info.dart';
 import 'package:photos/models/gallery_type.dart';
+import 'package:photos/models/metadata/collection_magic.dart';
 import "package:photos/models/metadata/common_keys.dart";
 import 'package:photos/models/selected_files.dart';
 import 'package:photos/service_locator.dart';
@@ -112,6 +113,15 @@ enum AlbumPopupAction {
   editLocation,
   deleteLocation,
   galleryGuestView,
+}
+
+enum AlbumSortOption {
+  dateNewestFirst,
+  dateOldestFirst,
+  durationLongestFirst,
+  durationShortestFirst,
+  fileSizeLargestFirst,
+  fileSizeSmallestFirst,
 }
 
 class _GalleryAppBarWidgetState extends State<GalleryAppBarWidget> {
@@ -889,7 +899,7 @@ class _GalleryAppBarWidgetState extends State<GalleryAppBarWidget> {
   }
 
   Future<void> _showSortOption(BuildContext bContext) async {
-    final bool? sortByAsc = await showMenu<bool>(
+    final AlbumSortOption? sortOption = await showMenu<AlbumSortOption>(
       context: bContext,
       position: RelativeRect.fromLTRB(
         MediaQuery.of(context).size.width,
@@ -899,17 +909,90 @@ class _GalleryAppBarWidgetState extends State<GalleryAppBarWidget> {
       ),
       items: [
         PopupMenuItem(
-          value: false,
+          value: AlbumSortOption.dateNewestFirst,
           child: Text(AppLocalizations.of(context).sortNewestFirst),
         ),
         PopupMenuItem(
-          value: true,
+          value: AlbumSortOption.dateOldestFirst,
           child: Text(AppLocalizations.of(context).sortOldestFirst),
+        ),
+        PopupMenuItem(
+          value: AlbumSortOption.durationLongestFirst,
+          child: const Text("Longest first (duration)"),
+        ),
+        PopupMenuItem(
+          value: AlbumSortOption.durationShortestFirst,
+          child: const Text("Shortest first (duration)"),
+        ),
+        PopupMenuItem(
+          value: AlbumSortOption.fileSizeLargestFirst,
+          child: const Text("Largest first (size)"),
+        ),
+        PopupMenuItem(
+          value: AlbumSortOption.fileSizeSmallestFirst,
+          child: const Text("Smallest first (size)"),
         ),
       ],
     );
-    if (sortByAsc != null) {
-      unawaited(changeSortOrder(bContext, widget.collection!, sortByAsc));
+    if (sortOption == null) {
+      return;
+    }
+
+    switch (sortOption) {
+      case AlbumSortOption.dateNewestFirst:
+        unawaited(
+          changeSortOrder(
+            bContext,
+            widget.collection!,
+            false,
+            sortBy: CollectionSortBy.creationTime,
+          ),
+        );
+      case AlbumSortOption.dateOldestFirst:
+        unawaited(
+          changeSortOrder(
+            bContext,
+            widget.collection!,
+            true,
+            sortBy: CollectionSortBy.creationTime,
+          ),
+        );
+      case AlbumSortOption.durationLongestFirst:
+        unawaited(
+          changeSortOrder(
+            bContext,
+            widget.collection!,
+            false,
+            sortBy: CollectionSortBy.duration,
+          ),
+        );
+      case AlbumSortOption.durationShortestFirst:
+        unawaited(
+          changeSortOrder(
+            bContext,
+            widget.collection!,
+            true,
+            sortBy: CollectionSortBy.duration,
+          ),
+        );
+      case AlbumSortOption.fileSizeLargestFirst:
+        unawaited(
+          changeSortOrder(
+            bContext,
+            widget.collection!,
+            false,
+            sortBy: CollectionSortBy.fileSize,
+          ),
+        );
+      case AlbumSortOption.fileSizeSmallestFirst:
+        unawaited(
+          changeSortOrder(
+            bContext,
+            widget.collection!,
+            true,
+            sortBy: CollectionSortBy.fileSize,
+          ),
+        );
     }
   }
 
@@ -1223,6 +1306,7 @@ class _GalleryAppBarWidgetState extends State<GalleryAppBarWidget> {
           galleryLoadStartTime,
           galleryLoadEndTime,
           asc: widget.collection!.pubMagicMetadata.asc ?? false,
+          sortBy: widget.collection!.pubMagicMetadata.resolvedSortBy,
         );
         collectionFiles = filesResult.files;
       } else {

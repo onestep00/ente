@@ -104,6 +104,7 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
   double _scrubSecondsPerPixel = 0;
   int _scrubTargetMs = 0;
   int _scrubDurationMs = 0;
+  DateTime? _lastPositionUiUpdate;
   final Map<int, Offset> _activePointers = {};
   bool _isPinching = false;
   VideoFitMode? _fitModeOverride;
@@ -535,8 +536,17 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
           break;
         }
         position = event.positionInMilliseconds;
-        if (mounted) {
-          setState(() {});
+        if (!_showControls.value) {
+          break;
+        }
+        final now = DateTime.now();
+        if (_lastPositionUiUpdate == null ||
+            now.difference(_lastPositionUiUpdate!) >=
+                const Duration(milliseconds: 250)) {
+          _lastPositionUiUpdate = now;
+          if (mounted) {
+            setState(() {});
+          }
         }
         break;
       case PlaybackEndedEvent():
@@ -581,6 +591,67 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
       return controllerDuration;
     }
     return null;
+  }
+
+  void _onScrubStart(DragStartDetails _) {
+    if (_isPinching) return;
+    if (_controller == null) return;
+    final durationMs = _videoDurationMs();
+    if (durationMs == null || durationMs <= 0) return;
+    _scrubDurationMs = durationMs;
+    _scrubSecondsPerPixel = _secondsPerPixel(durationMs);
+    _scrubTargetMs = _controller!.playbackPosition.inMilliseconds;
+    _scrubTargetMs = _scrubTargetMs.clamp(0, _scrubDurationMs) as int;
+    _isScrubbing = true;
+    _isSeeking.value = true;
+    _showControls.value = true;
+    _scrubProgressNotifier.value = _scrubTargetMs / _scrubDurationMs;
+    position = _scrubTargetMs;
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _onScrubUpdate(DragUpdateDetails details) {
+    if (_isPinching) return;
+    if (!_isScrubbing || _scrubDurationMs <= 0) return;
+    if (_scrubSecondsPerPixel == 0) return;
+    final deltaSeconds = details.delta.dx * _scrubSecondsPerPixel;
+    if (deltaSeconds == 0) return;
+    _scrubTargetMs += (deltaSeconds * 1000).round();
+    _scrubTargetMs = _scrubTargetMs.clamp(0, _scrubDurationMs) as int;
+    _seekToScrubTarget();
+  }
+
+  void _onScrubEnd(DragEndDetails _) {
+    if (_isPinching) return;
+    if (!_isScrubbing) return;
+    _isScrubbing = false;
+    _seekToScrubTarget();
+    _isSeeking.value = false;
+    _scrubProgressNotifier.value = null;
+  }
+
+  void _onScrubCancel() {
+    _isScrubbing = false;
+    _isSeeking.value = false;
+    _scrubProgressNotifier.value = null;
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _seekToScrubTarget() {
+    position = _scrubTargetMs;
+    if (mounted) {
+      setState(() {});
+    }
+    if (_scrubDurationMs > 0) {
+      _scrubProgressNotifier.value = _scrubTargetMs / _scrubDurationMs;
+    }
+    _scrubDebouncer.run(() async {
+      await _controller?.seekTo(Duration(milliseconds: _scrubTargetMs));
+    });
   }
 
   double _secondsPerPixel(int durationMs) {
@@ -646,67 +717,6 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
     if (_activePointers.length < 2) {
       _isPinching = false;
     }
-  }
-
-  void _onScrubStart(DragStartDetails _) {
-    if (_isPinching) return;
-    if (_controller == null) return;
-    final durationMs = _videoDurationMs();
-    if (durationMs == null || durationMs <= 0) return;
-    _scrubDurationMs = durationMs;
-    _scrubSecondsPerPixel = _secondsPerPixel(durationMs);
-    _scrubTargetMs = _controller!.playbackPosition.inMilliseconds;
-    _scrubTargetMs = _scrubTargetMs.clamp(0, _scrubDurationMs) as int;
-    _isScrubbing = true;
-    _isSeeking.value = true;
-    _showControls.value = true;
-    _scrubProgressNotifier.value = _scrubTargetMs / _scrubDurationMs;
-    position = _scrubTargetMs;
-    if (mounted) {
-      setState(() {});
-    }
-  }
-
-  void _onScrubUpdate(DragUpdateDetails details) {
-    if (_isPinching) return;
-    if (!_isScrubbing || _scrubDurationMs <= 0) return;
-    if (_scrubSecondsPerPixel == 0) return;
-    final deltaSeconds = details.delta.dx * _scrubSecondsPerPixel;
-    if (deltaSeconds == 0) return;
-    _scrubTargetMs += (deltaSeconds * 1000).round();
-    _scrubTargetMs = _scrubTargetMs.clamp(0, _scrubDurationMs) as int;
-    _seekToScrubTarget();
-  }
-
-  void _onScrubEnd(DragEndDetails _) {
-    if (_isPinching) return;
-    if (!_isScrubbing) return;
-    _isScrubbing = false;
-    _seekToScrubTarget();
-    _isSeeking.value = false;
-    _scrubProgressNotifier.value = null;
-  }
-
-  void _onScrubCancel() {
-    _isScrubbing = false;
-    _isSeeking.value = false;
-    _scrubProgressNotifier.value = null;
-    if (mounted) {
-      setState(() {});
-    }
-  }
-
-  void _seekToScrubTarget() {
-    position = _scrubTargetMs;
-    if (mounted) {
-      setState(() {});
-    }
-    if (_scrubDurationMs > 0) {
-      _scrubProgressNotifier.value = _scrubTargetMs / _scrubDurationMs;
-    }
-    _scrubDebouncer.run(() async {
-      await _controller?.seekTo(Duration(milliseconds: _scrubTargetMs));
-    });
   }
 
   Widget _buildScrubOverlay() {
@@ -882,7 +892,6 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
       );
     }
   }
-
   Widget _buildVideoViewport(VideoFitMode fitMode) {
     final videoAspectRatio =
         aspectRatio != null && aspectRatio! > 0 ? aspectRatio! : 1.0;
