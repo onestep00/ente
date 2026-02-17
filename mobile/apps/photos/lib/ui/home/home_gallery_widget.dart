@@ -102,6 +102,7 @@ class _HomeGalleryWidgetState extends State<HomeGalleryWidget> {
             ownerID,
             limit: limit,
             asc: asc,
+            sortBy: localSettings.getHomeGallerySortBy(),
             filterOptions: filterOptions,
           );
         } else {
@@ -111,6 +112,7 @@ class _HomeGalleryWidgetState extends State<HomeGalleryWidget> {
             ownerID,
             limit: limit,
             asc: asc,
+            sortBy: localSettings.getHomeGallerySortBy(),
             filterOptions: filterOptions,
           );
         }
@@ -129,6 +131,7 @@ class _HomeGalleryWidgetState extends State<HomeGalleryWidget> {
         Bus.instance.on<ForceReloadHomeGalleryEvent>(),
       ],
       tagPrefix: "home_gallery",
+      sortAsyncFn: () => localSettings.homeGallerySortAscending(),
       selectedFiles: widget.selectedFiles,
       header: widget.header,
       footer: widget.footer,

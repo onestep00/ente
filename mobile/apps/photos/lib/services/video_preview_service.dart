@@ -53,7 +53,9 @@ class VideoPreviewService {
   static const int _targetBitrateKbps = 8000;
   static const int _maxTargetBitrateKbps = 10000;
   static const int _maxTargetBufferKbps = 20000;
-  static const int _hardwareMaxTargetBitrateKbps = 10000;
+  static const int _hardwareTargetBitrateKbps = 10000;
+  static const int _hardwareMaxTargetBitrateKbps = 12000;
+  static const int _hardwareMaxTargetBufferKbps = 24000;
   static const int _maxTargetFps = 60;
   static const int _maxTargetDimension = 1080;
   static const int _hlsSegmentDurationSeconds = 2;
@@ -922,10 +924,16 @@ class VideoPreviewService {
           needsTonemap;
       final rescaleVideo = needsScale;
 
-      final int targetBitrateKbps = _targetBitrateKbps;
-      final int maxTargetBitrateKbps = _maxTargetBitrateKbps;
+      final int targetBitrateKbps = canUseHardwareEncoder
+          ? _hardwareTargetBitrateKbps
+          : _targetBitrateKbps;
+      final int maxTargetBitrateKbps = canUseHardwareEncoder
+          ? _hardwareMaxTargetBitrateKbps
+          : _maxTargetBitrateKbps;
       final int maxTargetBufferKbps = _capMaxBufferForBitrate(
-        baseBufferKbps: _maxTargetBufferKbps,
+        baseBufferKbps: canUseHardwareEncoder
+            ? _hardwareMaxTargetBufferKbps
+            : _maxTargetBufferKbps,
         maxBitrateKbps: maxTargetBitrateKbps,
       );
 

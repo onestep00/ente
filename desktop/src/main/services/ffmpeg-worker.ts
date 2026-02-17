@@ -31,12 +31,23 @@ const ffmpegPathOverrideEnvVar = "ENTE_FFMPEG_PATH";
 const ffmpegVideoEncoderOverrideEnvVar = "ENTE_FFMPEG_VIDEO_ENCODER";
 const qsvVideoEncoder = "h264_qsv";
 const vaapiVideoEncoder = "h264_vaapi";
+const nvencVideoEncoder = "h264_nvenc";
 const softwareVideoEncoder = "libx264";
+const preferredHardwareEncoders = [
+    vaapiVideoEncoder,
+    qsvVideoEncoder,
+    nvencVideoEncoder,
+] as const;
 const vaapiDeviceEnvVar = "ENTE_FFMPEG_VAAPI_DEVICE";
 const defaultVaapiDevice = "/dev/dri/renderD128";
 const ffmpegProgressUpdateIntervalMs = 2000;
+const hlsTargetBitrateKbps = 8000;
+const hlsMaxBitrateKbps = 12000;
+const hlsBufsizeKbps = 24000;
+const hlsMaxFps = 60;
+const hlsGopSeconds = 2;
 
-type VideoEncoder = "h264_qsv" | "h264_vaapi" | "libx264";
+type VideoEncoder = "h264_qsv" | "h264_vaapi" | "h264_nvenc" | "libx264";
 
 let cachedAvailableEncoders: Set<string> | undefined;
 let cachedPreferredVideoEncoder: VideoEncoder | undefined;
@@ -223,7 +234,11 @@ const resolvePreferredVideoEncoder = async (): Promise<VideoEncoder> => {
     const encoders = await ffmpegEncoders();
     const override = process.env[ffmpegVideoEncoderOverrideEnvVar]?.trim();
     if (override) {
-        if (override === qsvVideoEncoder || override === vaapiVideoEncoder) {
+        if (
+            override === qsvVideoEncoder ||
+            override === vaapiVideoEncoder ||
+            override === nvencVideoEncoder
+        ) {
             if (encoders.has(override)) {
                 cachedPreferredVideoEncoder = override;
                 return cachedPreferredVideoEncoder;
@@ -242,11 +257,13 @@ const resolvePreferredVideoEncoder = async (): Promise<VideoEncoder> => {
             );
         }
     }
-    cachedPreferredVideoEncoder = encoders.has(qsvVideoEncoder)
-        ? qsvVideoEncoder
-        : encoders.has(vaapiVideoEncoder)
-          ? vaapiVideoEncoder
-          : softwareVideoEncoder;
+    cachedPreferredVideoEncoder = softwareVideoEncoder;
+    for (const encoder of preferredHardwareEncoders) {
+        if (encoders.has(encoder)) {
+            cachedPreferredVideoEncoder = encoder;
+            break;
+        }
+    }
     return cachedPreferredVideoEncoder;
 };
 
@@ -255,8 +272,11 @@ const resolveFallbackVideoEncoder = async (
 ): Promise<VideoEncoder | undefined> => {
     if (preferred === softwareVideoEncoder) return undefined;
     const encoders = await ffmpegEncoders();
-    if (preferred === qsvVideoEncoder && encoders.has(vaapiVideoEncoder)) {
-        return vaapiVideoEncoder;
+    for (const encoder of preferredHardwareEncoders) {
+        if (encoder === preferred) continue;
+        if (encoders.has(encoder)) {
+            return encoder;
+        }
     }
     return softwareVideoEncoder;
 };
@@ -438,17 +458,18 @@ export interface FFmpegGenerateHLSPlaylistAndSegmentsResult {
  * Overview of the cases:
  *
  *     H.264, <= 10 MB              - Skip
- *     Prefer h264_qsv when available, then h264_vaapi, fallback to libx264
- *     Target up to 1080p, <=60 fps, ~6-10 Mbps
+ *     Prefer h264_vaapi when available, then h264_qsv, then h264_nvenc and
+ *     fallback to libx264.
+ *     Target up to 1080p, <=60 fps, ~6-12 Mbps
  *     HDR                          - Apply tonemap (zscale+tonemap+zscale)
  *
  * Example invocation:
  *
  *     ffmpeg -i in.mov -vf "scale='if(lt(iw,ih),min(1080,iw),-2)':'if(lt(iw,ih),-2,min(1080,ih))',fps=60,zscale=transfer=linear,tonemap=tonemap=hable:desat=0,zscale=primaries=709:transfer=709:matrix=709,format=yuv420p" -c:v libx264 -c:a aac -f hls -hls_key_info_file out.m3u8.info -hls_list_size 0 -hls_flags single_file out.m3u8
- * Targets up to 1080p, clamps to 60 fps, and uses ~8 Mbps with a 10 Mbps max
+ * Targets up to 1080p, clamps to 60 fps, and uses ~8 Mbps with a 12 Mbps max
  * rate.
- * When h264_qsv or h264_vaapi is available, we switch the encoder and use
- * format=nv12 (plus hwupload for VAAPI).
+ * When h264_vaapi, h264_qsv, or h264_nvenc is available, we switch the encoder
+ * and use format=nv12 (plus hwupload for VAAPI).
  *
  * See: [Note: Preview variant of videos]
  *
@@ -481,13 +502,22 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
     fetchURL: string,
     authToken: string,
 ): Promise<FFmpegGenerateHLSPlaylistAndSegmentsResult | undefined> => {
-    const { isH264, isHDR, bitrate, width, height, fps, durationSeconds } =
+    const {
+        isH264,
+        streamCopySafe,
+        isHDR,
+        bitrate,
+        width,
+        height,
+        fps,
+        durationSeconds,
+    } =
         await detectVideoCharacteristics(inputFilePath);
 
     const targetMaxDimension = 1080;
-    const targetMaxFps = 60;
+    const targetMaxFps = hlsMaxFps;
     const targetMinBitrate = 6000 * 1000;
-    const targetMaxBitrate = 10000 * 1000;
+    const targetMaxBitrate = hlsMaxBitrateKbps * 1000;
 
     // If the video is smaller than 10 MB, and already H.264 (the codec we are
     // going to use for the conversion), then a streaming variant is not much
@@ -521,17 +551,22 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
         }
     }
 
-    // If the video is already H.264, then we only reencode if we need to adjust
-    // resolution, fps, bitrate, or tonemap.
+    // If the video is already H.264, only skip copy when it is safe by a
+    // conservative heuristic.
     const rescaleVideo =
-        !width || !height || Math.min(width, height) > targetMaxDimension;
+        !width || !height || Math.max(width, height) > targetMaxDimension;
     const clampFps = fps !== undefined && fps > targetMaxFps;
     const needsBitrateAdjust =
         !bitrate ||
         bitrate < targetMinBitrate ||
         bitrate > targetMaxBitrate;
     const reencodeVideo =
-        !isH264 || isHDR || rescaleVideo || clampFps || needsBitrateAdjust;
+        !isH264 ||
+        !streamCopySafe ||
+        isHDR ||
+        rescaleVideo ||
+        clampFps ||
+        needsBitrateAdjust;
     const preferredVideoEncoder = reencodeVideo
         ? await resolvePreferredVideoEncoder()
         : undefined;
@@ -540,6 +575,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
         JSON.stringify({
             isH264,
             isHDR,
+            streamCopySafe,
             bitrate,
             width,
             height,
@@ -701,7 +737,9 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
             );
         }
         const isHardwareEncoder =
-            encoder === qsvVideoEncoder || encoder === vaapiVideoEncoder;
+            encoder === qsvVideoEncoder ||
+            encoder === vaapiVideoEncoder ||
+            encoder === nvencVideoEncoder;
         const pixelFormat = isHardwareEncoder ? "nv12" : "yuv420p";
         // Output using a format suitable for the selected encoder.
         videoFilters.push(`format=${pixelFormat}`);
@@ -726,8 +764,9 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
     //
     // - `-c:v libx264` converts the video stream to the H.264 codec.
     // - `-c:v h264_qsv` uses Intel Quick Sync when available.
+    // - `-c:v h264_nvenc` uses NVIDIA NVENC when available.
     //
-    // - Target ~8 Mbps with a 6-10 Mbps VBV window.
+    // - Target ~8 Mbps with a 6-12 Mbps VBV window.
     //
     // - `-bufsize` is set to 2x maxrate for smooth rate control.
     //
@@ -735,23 +774,44 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
     const buildVideoCodecArgs = (encoder: VideoEncoder | undefined) => {
         if (!reencodeVideo) return ["-c:v", "copy"];
         const effectiveEncoder = encoder ?? softwareVideoEncoder;
+        const gopSize = targetMaxFps * hlsGopSeconds;
         return [
             "-c:v",
             effectiveEncoder,
+            "-g",
+            `${gopSize}`,
+            "-keyint_min",
+            `${gopSize}`,
+            "-sc_threshold",
+            "0",
             "-b:v",
-            "8000k",
+            `${hlsTargetBitrateKbps}k`,
             "-maxrate",
-            "10000k",
+            `${hlsMaxBitrateKbps}k`,
             "-bufsize",
-            "20000k",
+            `${hlsBufsizeKbps}k`,
         ];
+    };
+
+    const vaapiDevice = () =>
+        process.env[vaapiDeviceEnvVar]?.trim() ?? defaultVaapiDevice;
+
+    const buildHardwareDecodeArgs = (encoder: VideoEncoder | undefined) => {
+        if (encoder === vaapiVideoEncoder) {
+            return ["-hwaccel", "vaapi", "-hwaccel_device", vaapiDevice()];
+        }
+        if (encoder === qsvVideoEncoder) {
+            return ["-hwaccel", "qsv"];
+        }
+        if (encoder === nvencVideoEncoder) {
+            return ["-hwaccel", "cuda"];
+        }
+        return [];
     };
 
     const buildHardwareDeviceArgs = (encoder: VideoEncoder | undefined) => {
         if (encoder !== vaapiVideoEncoder) return [];
-        const device =
-            process.env[vaapiDeviceEnvVar]?.trim() ?? defaultVaapiDevice;
-        return ["-vaapi_device", device];
+        return ["-vaapi_device", vaapiDevice()];
     };
 
     const buildCommand = (
@@ -763,6 +823,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
             // Reduce the amount of output lines we have to parse.
             ["-hide_banner"],
             includeProgress ? ["-progress", "pipe:1", "-nostats"] : [],
+            buildHardwareDecodeArgs(encoder),
             buildHardwareDeviceArgs(encoder),
             // Input file. We don't need any extra options that apply to the input file.
             "-i",
@@ -982,6 +1043,7 @@ const parseDurationFromFFmpegOutput = (videoInfo: string) => {
 
 interface VideoCharacteristics {
     isH264: boolean;
+    streamCopySafe: boolean;
     isHDR: boolean;
     bitrate: number | undefined;
     width: number | undefined;
@@ -995,6 +1057,7 @@ interface VideoCharacteristics {
  * {@link inputFilePath}:
  *
  * - If is encoded using H.264 codec.
+ * - If it appears safe to copy for stream generation.
  * - If it is HDR.
  * - Its bitrate, frame rate, and dimensions.
  *
@@ -1030,6 +1093,7 @@ const detectVideoCharacteristics = async (inputFilePath: string) => {
     // codec conversion to happen, even if it is unnecessary.
     const res: VideoCharacteristics = {
         isH264: false,
+        streamCopySafe: true,
         isHDR: false,
         bitrate: undefined,
         width: undefined,
@@ -1040,6 +1104,19 @@ const detectVideoCharacteristics = async (inputFilePath: string) => {
     if (!videoStreamLine) return res;
 
     res.isH264 = videoStreamLine.startsWith("h264 ");
+    if (res.isH264) {
+        const hasUnsafeProfile = /\b(?:Main|High|High 10|Main 10|Extended)\b/.test(
+            videoStreamLine,
+        );
+        const hasUnsafePixelFormat = /yuv42[0-9]|yuv444|yuv420p10|10le/.test(
+            videoStreamLine,
+        );
+        const hasSafeProfile = /\((?:Constrained Baseline|Baseline)\)/.test(
+            videoStreamLine,
+        );
+        res.streamCopySafe =
+            hasSafeProfile && !hasUnsafeProfile && !hasUnsafePixelFormat;
+    }
 
     // Same check as `isHDRVideo`.
     res.isHDR =
