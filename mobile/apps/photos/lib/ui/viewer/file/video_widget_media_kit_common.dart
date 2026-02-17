@@ -18,7 +18,7 @@ class VideoWidget extends StatefulWidget {
   final VideoController controller;
   final FullScreenRequestCallback? playbackCallback;
   final TransformationController? transformationController;
-  final Function(bool)? shouldDisableScroll;
+  final ValueChanged<bool>? onInteractionLockChanged;
   final bool isFromMemories;
   final void Function() onStreamChange;
   final bool isPreviewPlayer;
@@ -29,7 +29,7 @@ class VideoWidget extends StatefulWidget {
     this.playbackCallback, {
     super.key,
     this.transformationController,
-    this.shouldDisableScroll,
+    this.onInteractionLockChanged,
     required this.isFromMemories,
     // ignore: unused_element
     required this.onStreamChange,
@@ -309,15 +309,15 @@ class _VideoWidgetState extends State<VideoWidget> {
       fit: videoFitModeToBoxFit(fitMode),
       controls: NoVideoControls,
     );
-    final videoLayer = widget.transformationController != null
-        ? ZoomableVideoViewer(
-            transformationController: widget.transformationController!,
-            shouldDisableScroll: widget.shouldDisableScroll,
-            child: videoWidget,
-          )
-        : videoWidget;
+  final videoLayer = widget.transformationController != null
+      ? ZoomableVideoViewer(
+          transformationController: widget.transformationController!,
+          onInteractionLockChanged: widget.onInteractionLockChanged,
+          child: videoWidget,
+        )
+      : videoWidget;
 
-    return Stack(
+  return Stack(
       fit: StackFit.expand,
       children: [
         ClipRect(child: videoLayer),

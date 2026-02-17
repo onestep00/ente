@@ -1347,6 +1347,10 @@
       "title": "Peerberry"
     },
     {
+      "title": "Perkbox",
+      "slug": "perkbox"
+    },
+    {
       "title": "Pingvin Share"
     },
     {
@@ -1654,6 +1658,12 @@
       "hex": "EDA920"
     },
     {
+      "title": "Stoat",
+      "altNames": [
+        "stoat.chat"
+      ] 
+    },
+    {
       "title": "Stripchat",
       "slug": "stripchat",
       "altNames": [
@@ -1948,6 +1958,9 @@
       "title": "Wealthfront"
     },
     {
+      "title": "Wealthify"
+    },
+    {
       "title": "Wealthsimple"
     },
     {
@@ -2170,6 +2183,10 @@
       "name": "Manage My Health",
       "slug": "managemyhealth",
       "altNames": ["managemyhealth", "Manage My Health NZ"]
+    },
+    {
+      "title": "Pufferfish Host",
+      "slug": "pufferfish_host"
     }
   ]
 }
