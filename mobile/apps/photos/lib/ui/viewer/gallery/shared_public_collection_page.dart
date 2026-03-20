@@ -13,7 +13,9 @@ import "package:photos/l10n/l10n.dart";
 import "package:photos/models/collection/collection_items.dart";
 import "package:photos/models/file/file.dart";
 import "package:photos/models/file_load_result.dart";
+import "package:photos/models/file/file_type.dart";
 import "package:photos/models/gallery_type.dart";
+import "package:photos/models/metadata/collection_magic.dart";
 import "package:photos/models/selected_files.dart";
 import "package:photos/services/collections_service.dart";
 import "package:photos/services/sync/remote_sync_service.dart";
@@ -30,7 +32,6 @@ import "package:photos/ui/viewer/gallery/state/gallery_boundaries_provider.dart"
 import "package:photos/ui/viewer/gallery/state/gallery_files_inherited_widget.dart";
 import "package:photos/ui/viewer/gallery/state/selection_state.dart";
 import "package:photos/utils/dialog_util.dart";
-import "package:photos/utils/public_link_layout_util.dart";
 
 class SharedPublicCollectionPage extends StatefulWidget {
   final CollectionWithThumbnail c;
@@ -117,18 +118,67 @@ class _SharedPublicCollectionPageState
     final List<EnteFile>? initialFiles =
         widget.c.thumbnail != null ? [widget.c.thumbnail!] : null;
 
-    // Determine groupType based on collection layout.
-    // masonry/continuous (or unset) map to non-grouped rendering.
-    final normalizedLayout = normalizePublicLinkLayout(
-      widget.c.collection.pubMagicMetadata.layout,
-    );
-    final GroupType groupType =
-        normalizedLayout == "masonry" ? GroupType.none : GroupType.day;
+    // Determine groupType based on collection layout
+    GroupType groupType;
+    final layout = widget.c.collection.pubMagicMetadata.layout ?? "grouped";
+    switch (layout) {
+      case "continuous":
+        groupType = GroupType.none;
+        break;
+      case "grouped":
+      default:
+        groupType = GroupType.day;
+        break;
+    }
 
     final gallery = Gallery(
       asyncLoader: (creationStartTime, creationEndTime, {limit, asc}) async {
+        final sortBy = widget.c.collection.pubMagicMetadata.resolvedSortBy;
+        final sortAsc = widget.c.collection.pubMagicMetadata.asc ?? false;
+        const videoFileType = FileType.video;
+
+        int compareForSort(int a, int b) {
+          return sortAsc ? a.compareTo(b) : b.compareTo(a);
+        }
+
         widget.files!.sort(
-          (a, b) => b.creationTime!.compareTo(a.creationTime!),
+          (a, b) {
+            if (sortBy != CollectionSortBy.creationTime) {
+              final bool isAVideo = a.fileType == videoFileType;
+              final bool isBVideo = b.fileType == videoFileType;
+              if (isAVideo != isBVideo) {
+                return isAVideo ? -1 : 1;
+              }
+            }
+
+            if (sortBy == CollectionSortBy.duration) {
+              final int compareDuration = compareForSort(
+                a.duration ?? 0,
+                b.duration ?? 0,
+              );
+              if (compareDuration != 0) {
+                return compareDuration;
+              }
+            } else if (sortBy == CollectionSortBy.fileSize) {
+              final int compareFileSize = compareForSort(
+                a.fileSize ?? 0,
+                b.fileSize ?? 0,
+              );
+              if (compareFileSize != 0) {
+                return compareFileSize;
+              }
+            }
+
+            final int compareCreation = compareForSort(
+              a.creationTime ?? 0,
+              b.creationTime ?? 0,
+            );
+            if (compareCreation != 0) {
+              return compareCreation;
+            }
+
+            return compareForSort(a.modificationTime ?? 0, b.modificationTime ?? 0);
+          },
         );
 
         return FileLoadResult(widget.files!, false);
@@ -152,7 +202,6 @@ class _SharedPublicCollectionPageState
       selectedFiles: _selectedFiles,
       initialFiles: initialFiles,
       albumName: widget.c.collection.displayName,
-      galleryType: galleryType,
       groupType: groupType,
       header: widget.c.collection.isJoinEnabled &&
               Configuration.instance.isLoggedIn()

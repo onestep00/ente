@@ -3,6 +3,7 @@ import "dart:io";
 import 'package:flutter/foundation.dart';
 import 'package:photos/app_mode.dart';
 import 'package:photos/core/constants.dart';
+import 'package:photos/models/metadata/collection_magic.dart';
 import 'package:photos/ui/viewer/gallery/component/group/type.dart';
 import "package:photos/utils/ram_check_util.dart";
 import 'package:shared_preferences/shared_preferences.dart';
@@ -44,6 +45,8 @@ enum OfflineFlag {
 
 class LocalSettings {
   static const kCollectionSortPref = "collection_sort_pref";
+  static const kHomeGallerySortBy = "home_gallery_sort_by";
+  static const kHomeGallerySortAsc = "home_gallery_sort_asc";
   static const kGalleryGroupType = "gallery_group_type";
   static const kPhotoGridSize = "photo_grid_size";
   static const _kisMLLocalIndexingEnabled = "ls.ml_local_indexing";
@@ -125,6 +128,28 @@ class LocalSettings {
 
   Future<void> setAlbumViewType(AlbumViewType viewType) async {
     await _prefs.setInt(kCollectionViewType, viewType.index);
+  }
+
+  CollectionSortBy getHomeGallerySortBy() {
+    final index = _prefs.getInt(kHomeGallerySortBy);
+    if (index == null ||
+        index < 0 ||
+        index >= CollectionSortBy.values.length) {
+      return CollectionSortBy.creationTime;
+    }
+    return CollectionSortBy.values[index];
+  }
+
+  Future<bool> setHomeGallerySortBy(CollectionSortBy sortBy) {
+    return _prefs.setInt(kHomeGallerySortBy, sortBy.index);
+  }
+
+  bool homeGallerySortAscending() {
+    return _prefs.getBool(kHomeGallerySortAsc) ?? false;
+  }
+
+  Future<bool> setHomeGallerySortAscending(bool value) {
+    return _prefs.setBool(kHomeGallerySortAsc, value);
   }
 
   AlbumViewType albumViewType() {

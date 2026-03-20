@@ -798,6 +798,7 @@
     "light": "Light",
     "dark": "Dark",
     "streamable_videos": "Streamable videos",
+    "recreate_stream": "Recreate stream",
     "processing_videos_status": "Processing videos...",
     "share_favorites": "Share favorites",
     "person_favorites": "{{name}}'s favorites",

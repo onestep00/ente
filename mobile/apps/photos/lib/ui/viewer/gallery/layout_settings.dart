@@ -5,6 +5,7 @@ import "package:flutter/material.dart";
 import "package:photos/core/event_bus.dart";
 import "package:photos/events/force_reload_home_gallery_event.dart";
 import "package:photos/generated/l10n.dart";
+import "package:photos/models/metadata/collection_magic.dart";
 import "package:photos/l10n/l10n.dart";
 import "package:photos/service_locator.dart";
 import "package:photos/theme/ente_theme.dart";
@@ -37,10 +38,27 @@ class _GalleryLayoutSettingsState extends State<GalleryLayoutSettings> {
     });
   }
 
+  Future<void> _setHomeGallerySort({
+    required CollectionSortBy sortBy,
+    required bool asc,
+  }) async {
+    await Future.wait([
+      localSettings.setHomeGallerySortBy(sortBy),
+      localSettings.setHomeGallerySortAscending(asc),
+    ]);
+    if (!mounted) return;
+    Bus.instance.fire(
+      ForceReloadHomeGalleryEvent("Home gallery sort changed"),
+    );
+    Navigator.pop(context);
+  }
+
   @override
   Widget build(BuildContext context) {
     final textTheme = getEnteTextTheme(context);
     final colorScheme = getEnteColorScheme(context);
+    final homeSortBy = localSettings.getHomeGallerySortBy();
+    final homeSortAsc = localSettings.homeGallerySortAscending();
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.symmetric(
@@ -154,6 +172,163 @@ class _GalleryLayoutSettingsState extends State<GalleryLayoutSettings> {
                           _reloadWithLatestSetting();
                         },
                       ),
+                    ),
+                  ],
+                ),
+                Column(
+                  children: [
+                    Padding(
+                      padding:
+                          const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      child: Align(
+                        child: Text(
+                          context.l10n.sort,
+                          style: textTheme.largeBold,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Column(
+                      children: [
+                        MenuItemWidget(
+                          captionedTextWidget: CaptionedTextWidget(
+                            title: AppLocalizations.of(context).sortNewestFirst,
+                          ),
+                          menuItemColor: colorScheme.fillFaint,
+                          alignCaptionedTextToLeft: true,
+                          isBottomBorderRadiusRemoved: true,
+                          showOnlyLoadingState: true,
+                          trailingIcon: homeSortBy == CollectionSortBy.creationTime &&
+                                  !homeSortAsc
+                              ? Icons.check
+                              : null,
+                          onTap: () async {
+                            await _setHomeGallerySort(
+                              sortBy: CollectionSortBy.creationTime,
+                              asc: false,
+                            );
+                          },
+                        ),
+                        DividerWidget(
+                          dividerType: DividerType.menuNoIcon,
+                          bgColor: getEnteColorScheme(context).fillFaint,
+                        ),
+                        MenuItemWidget(
+                          captionedTextWidget: CaptionedTextWidget(
+                            title: AppLocalizations.of(context).sortOldestFirst,
+                          ),
+                          menuItemColor: colorScheme.fillFaint,
+                          alignCaptionedTextToLeft: true,
+                          isTopBorderRadiusRemoved: true,
+                          isBottomBorderRadiusRemoved: true,
+                          showOnlyLoadingState: true,
+                          trailingIcon: homeSortBy == CollectionSortBy.creationTime &&
+                                  homeSortAsc
+                              ? Icons.check
+                              : null,
+                          onTap: () async {
+                            await _setHomeGallerySort(
+                              sortBy: CollectionSortBy.creationTime,
+                              asc: true,
+                            );
+                          },
+                        ),
+                        DividerWidget(
+                          dividerType: DividerType.menuNoIcon,
+                          bgColor: getEnteColorScheme(context).fillFaint,
+                        ),
+                        MenuItemWidget(
+                          captionedTextWidget: const CaptionedTextWidget(
+                            title: "Longest first (duration)",
+                          ),
+                          menuItemColor: colorScheme.fillFaint,
+                          alignCaptionedTextToLeft: true,
+                          isTopBorderRadiusRemoved: true,
+                          isBottomBorderRadiusRemoved: true,
+                          showOnlyLoadingState: true,
+                          trailingIcon:
+                              homeSortBy == CollectionSortBy.duration && !homeSortAsc
+                                  ? Icons.check
+                                  : null,
+                          onTap: () async {
+                            await _setHomeGallerySort(
+                              sortBy: CollectionSortBy.duration,
+                              asc: false,
+                            );
+                          },
+                        ),
+                        DividerWidget(
+                          dividerType: DividerType.menuNoIcon,
+                          bgColor: getEnteColorScheme(context).fillFaint,
+                        ),
+                        MenuItemWidget(
+                          captionedTextWidget: const CaptionedTextWidget(
+                            title: "Shortest first (duration)",
+                          ),
+                          menuItemColor: colorScheme.fillFaint,
+                          alignCaptionedTextToLeft: true,
+                          isTopBorderRadiusRemoved: true,
+                          isBottomBorderRadiusRemoved: true,
+                          showOnlyLoadingState: true,
+                          trailingIcon: homeSortBy == CollectionSortBy.duration &&
+                                  homeSortAsc
+                              ? Icons.check
+                              : null,
+                          onTap: () async {
+                            await _setHomeGallerySort(
+                              sortBy: CollectionSortBy.duration,
+                              asc: true,
+                            );
+                          },
+                        ),
+                        DividerWidget(
+                          dividerType: DividerType.menuNoIcon,
+                          bgColor: getEnteColorScheme(context).fillFaint,
+                        ),
+                        MenuItemWidget(
+                          captionedTextWidget: const CaptionedTextWidget(
+                            title: "Largest first (size)",
+                          ),
+                          menuItemColor: colorScheme.fillFaint,
+                          alignCaptionedTextToLeft: true,
+                          isTopBorderRadiusRemoved: true,
+                          isBottomBorderRadiusRemoved: true,
+                          showOnlyLoadingState: true,
+                          trailingIcon:
+                              homeSortBy == CollectionSortBy.fileSize && !homeSortAsc
+                                  ? Icons.check
+                                  : null,
+                          onTap: () async {
+                            await _setHomeGallerySort(
+                              sortBy: CollectionSortBy.fileSize,
+                              asc: false,
+                            );
+                          },
+                        ),
+                        DividerWidget(
+                          dividerType: DividerType.menuNoIcon,
+                          bgColor: getEnteColorScheme(context).fillFaint,
+                        ),
+                        MenuItemWidget(
+                          captionedTextWidget: const CaptionedTextWidget(
+                            title: "Smallest first (size)",
+                          ),
+                          menuItemColor: colorScheme.fillFaint,
+                          alignCaptionedTextToLeft: true,
+                          isTopBorderRadiusRemoved: true,
+                          showOnlyLoadingState: true,
+                          trailingIcon:
+                              homeSortBy == CollectionSortBy.fileSize && homeSortAsc
+                                  ? Icons.check
+                                  : null,
+                          onTap: () async {
+                            await _setHomeGallerySort(
+                              sortBy: CollectionSortBy.fileSize,
+                              asc: true,
+                            );
+                          },
+                        ),
+                      ],
                     ),
                   ],
                 ),

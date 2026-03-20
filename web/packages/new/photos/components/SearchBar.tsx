@@ -552,11 +552,28 @@ const EmptyState: React.FC<
         case undefined:
         case "disabled":
         case "done":
-            // If ML is not running, see if video processing is.
-            if (vpStatus?.enabled && vpStatus.status == "processing") {
-                label = t("processing_videos_status");
-            }
-            break;
+                // If ML is not running, see if video processing is.
+                if (vpStatus?.enabled && vpStatus.status == "processing") {
+                    const labelParts: string[] = [];
+                    if (
+                        vpStatus.processedCount !== undefined &&
+                        vpStatus.totalCount !== undefined
+                    ) {
+                    labelParts.push(
+                        `${vpStatus.processedCount}/${vpStatus.totalCount}`,
+                    );
+                }
+                if (vpStatus.currentProgress !== undefined) {
+                    const percent = Math.round(vpStatus.currentProgress * 100);
+                    labelParts.push(`${percent}%`);
+                }
+
+                    label =
+                        labelParts.length > 0
+                            ? `${t("processing_videos_status")} ${labelParts.join(" | ")}`
+                            : t("processing_videos_status");
+                }
+                break;
         case "scheduled":
             label = t("indexing_scheduled");
             break;

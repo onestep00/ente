@@ -13,3 +13,7 @@
 -dontwarn com.google.android.exoplayer2.**
 -keep class com.ryanheise.just_audio.** { *; }
 -dontwarn com.ryanheise.just_audio.**
+-keep class com.antonkarpenko.ffmpegkit.** { *; }
+-keep class com.arthenica.ffmpegkit.** { *; }
+-keep class org.ffmpeg.** { *; }
+-keep class * extends java.lang.Exception { *; }

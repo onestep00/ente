@@ -11,7 +11,14 @@ class SeekBar extends StatefulWidget {
   final NativeVideoPlayerController controller;
   final int? duration;
   final ValueNotifier<bool> isSeeking;
-  const SeekBar(this.controller, this.duration, this.isSeeking, {super.key});
+  final ValueNotifier<double?>? scrubPositionNotifier;
+  const SeekBar(
+    this.controller,
+    this.duration,
+    this.isSeeking, {
+    super.key,
+    this.scrubPositionNotifier,
+  });
 
   @override
   State<SeekBar> createState() => _SeekBarState();
@@ -25,6 +32,7 @@ class _SeekBarState extends State<SeekBar> with SingleTickerProviderStateMixin {
   );
   StreamSubscription<void>? _eventsSubscription;
   StreamSubscription<SeekbarTriggeredEvent>? _seekbarSubscription;
+  VoidCallback? _scrubListener;
 
   @override
   void initState() {
@@ -50,6 +58,15 @@ class _SeekBarState extends State<SeekBar> with SingleTickerProviderStateMixin {
       _listen,
     );
 
+    if (widget.scrubPositionNotifier != null) {
+      _scrubListener = () {
+        final value = widget.scrubPositionNotifier!.value;
+        if (value == null) return;
+        _animationController.value = value.clamp(0.0, 1.0).toDouble();
+      };
+      widget.scrubPositionNotifier!.addListener(_scrubListener!);
+    }
+
     _startMovingSeekbar();
   }
 
@@ -57,6 +74,9 @@ class _SeekBarState extends State<SeekBar> with SingleTickerProviderStateMixin {
   void dispose() {
     _seekbarSubscription?.cancel();
     _eventsSubscription?.cancel();
+    if (_scrubListener != null) {
+      widget.scrubPositionNotifier?.removeListener(_scrubListener!);
+    }
     _animationController.dispose();
     _debouncer.cancelDebounceTimer();
     super.dispose();
@@ -160,6 +180,10 @@ class _SeekBarState extends State<SeekBar> with SingleTickerProviderStateMixin {
   }
 
   void _onPlaybackPositionChanged() async {
+    if (widget.isSeeking.value ||
+        widget.scrubPositionNotifier?.value != null) {
+      return;
+    }
     if (widget.controller.playbackStatus == PlaybackStatus.paused ||
         (widget.controller.playbackStatus == PlaybackStatus.stopped &&
             widget.controller.playbackPosition.inSeconds != 0)) {

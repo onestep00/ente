@@ -18,15 +18,18 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import CheckCircleOutlineIcon from "@mui/icons-material/CheckCircleOutline";
 import CloseIcon from "@mui/icons-material/Close";
+import ReplayIcon from "@mui/icons-material/Replay";
 import { Box, Button, IconButton, Tooltip, Typography } from "@mui/material";
 import { SpacedRow } from "ente-base/components/containers";
 import type { ButtonishProps } from "ente-base/components/mui";
 import { useBaseContext } from "ente-base/context";
+import { isHLSGenerationSupported } from "ente-gallery/services/video";
 import type { Collection } from "ente-media/collection";
 import type { CollectionSelectorAttributes } from "ente-new/photos/components/CollectionSelector";
 import type { GalleryBarMode } from "ente-new/photos/components/gallery/reducer";
 import { StarBorderIcon } from "ente-new/photos/components/icons/StarIcon";
 import { StarOffIcon } from "ente-new/photos/components/icons/StarOffIcon";
+import { useHLSGenerationStatusSnapshot } from "ente-new/photos/components/utils/use-snapshot";
 import {
     PseudoCollectionID,
     type CollectionSummary,
@@ -39,6 +42,7 @@ import { t } from "i18next";
 export type FileOp =
     | "sendLink"
     | "download"
+    | "recreateStream"
     | "fixTime"
     | "favorite"
     | "unfavorite"
@@ -81,6 +85,10 @@ interface SelectedFileOptionsProps {
      * The number of selected files that are currently favorited.
      */
     selectedFavoriteCount: number;
+    /**
+     * The subset of {@link selectedFileCount} that are owned by the user and are videos.
+     */
+    selectedOwnVideoCount: number;
     /**
      * Called when the user clears the selection by pressing the cancel button
      * on the selection bar.
@@ -187,6 +195,7 @@ export const SelectedFileOptions: React.FC<SelectedFileOptionsProps> = ({
     selectedFileCount,
     selectedOwnFileCount,
     selectedFavoriteCount,
+    selectedOwnVideoCount,
     onClearSelection,
     onRemoveFilesFromCollection,
     onOpenCollectionSelector,
@@ -199,9 +208,14 @@ export const SelectedFileOptions: React.FC<SelectedFileOptionsProps> = ({
     isAllSelected,
 }) => {
     const { showMiniDialog } = useBaseContext();
+    const hlsStatus = useHLSGenerationStatusSnapshot();
 
     const isUserFavorites =
         !!collectionSummary?.attributes.has("userFavorites");
+    const shouldShowRecreateStream =
+        isHLSGenerationSupported &&
+        hlsStatus?.enabled &&
+        selectedOwnVideoCount > 0;
 
     const handleFavorite = createFileOpHandler("favorite");
     const handleUnfavorite = createFileOpHandler("unfavorite");
@@ -210,6 +224,7 @@ export const SelectedFileOptions: React.FC<SelectedFileOptionsProps> = ({
 
     const handleDownload = createFileOpHandler("download");
     const handleSendLink = createFileOpHandler("sendLink");
+    const handleRecreateStream = createFileOpHandler("recreateStream");
 
     const handleArchive = createFileOpHandler("archive");
 
@@ -338,6 +353,10 @@ export const SelectedFileOptions: React.FC<SelectedFileOptionsProps> = ({
         });
     };
 
+    const recreateStreamButton = shouldShowRecreateStream ? (
+        <RecreateStreamButton onClick={handleRecreateStream} />
+    ) : null;
+
     return (
         <>
             <SpacedRow sx={{ flex: 1, gap: 1, flexWrap: "wrap" }}>
@@ -370,6 +389,7 @@ export const SelectedFileOptions: React.FC<SelectedFileOptionsProps> = ({
                             <EditLocationButton onClick={onEditLocation} />
                         )}
                         <DownloadButton onClick={handleDownload} />
+                        {recreateStreamButton}
                         <AddToCollectionButton
                             onClick={handleAddToCollection}
                         />
@@ -389,6 +409,7 @@ export const SelectedFileOptions: React.FC<SelectedFileOptionsProps> = ({
                         )}
                         {favoriteActionButton}
                         <DownloadButton onClick={handleDownload} />
+                        {recreateStreamButton}
                         <AddToCollectionButton
                             onClick={handleAddToCollection}
                         />
@@ -414,6 +435,7 @@ export const SelectedFileOptions: React.FC<SelectedFileOptionsProps> = ({
                             <SendLinkButton onClick={handleSendLink} />
                         )}
                         <DownloadButton onClick={handleDownload} />
+                        {recreateStreamButton}
                         {!!onShowAssignPersonDialog && (
                             <AddPersonButton
                                 onClick={onShowAssignPersonDialog}
@@ -430,6 +452,7 @@ export const SelectedFileOptions: React.FC<SelectedFileOptionsProps> = ({
                             <SendLinkButton onClick={handleSendLink} />
                         )}
                         <DownloadButton onClick={handleDownload} />
+                        {recreateStreamButton}
                         {!!onShowAssignPersonDialog && (
                             <AddPersonButton
                                 onClick={onShowAssignPersonDialog}
@@ -445,6 +468,7 @@ export const SelectedFileOptions: React.FC<SelectedFileOptionsProps> = ({
                             <SendLinkButton onClick={handleSendLink} />
                         )}
                         <DownloadButton onClick={handleDownload} />
+                        {recreateStreamButton}
                         {!!onShowAssignPersonDialog && (
                             <AddPersonButton
                                 onClick={onShowAssignPersonDialog}
@@ -466,6 +490,7 @@ export const SelectedFileOptions: React.FC<SelectedFileOptionsProps> = ({
                             <EditLocationButton onClick={onEditLocation} />
                         )}
                         <DownloadButton onClick={handleDownload} />
+                        {recreateStreamButton}
                         <AddToCollectionButton
                             onClick={handleAddToCollection}
                         />
@@ -608,6 +633,14 @@ const AddToCollectionButton: React.FC<ButtonishProps> = ({ onClick }) => (
     <Tooltip title={t("add")}>
         <IconButton {...{ onClick }}>
             <HugeiconsIcon icon={AddSquareIcon} />
+        </IconButton>
+    </Tooltip>
+);
+
+const RecreateStreamButton: React.FC<ButtonishProps> = ({ onClick }) => (
+    <Tooltip title={t("recreate_stream")}>
+        <IconButton {...{ onClick }}>
+            <ReplayIcon />
         </IconButton>
     </Tooltip>
 );

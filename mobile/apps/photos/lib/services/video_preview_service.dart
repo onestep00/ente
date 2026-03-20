@@ -2,13 +2,13 @@ import "dart:async";
 import "dart:collection";
 import "dart:convert";
 import "dart:io";
+import "dart:typed_data";
 
 import "package:collection/collection.dart";
 import "package:dio/dio.dart";
 import "package:encrypt/encrypt.dart" as enc;
-import "package:ffmpeg_kit_flutter/ffmpeg_kit.dart";
-import "package:ffmpeg_kit_flutter/return_code.dart";
-import "package:flutter/foundation.dart";
+import "package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart";
+import "package:ffmpeg_kit_flutter_new/return_code.dart";
 import "package:flutter/widgets.dart";
 import "package:flutter_cache_manager/flutter_cache_manager.dart";
 import "package:logging/logging.dart";
@@ -28,12 +28,10 @@ import "package:photos/models/base/id.dart";
 import "package:photos/models/ffmpeg/ffprobe_props.dart";
 import "package:photos/models/file/file.dart";
 import "package:photos/models/file/file_type.dart";
-import "package:photos/models/metadata/file_magic.dart";
 import "package:photos/models/preview/playlist_data.dart";
 import "package:photos/models/preview/preview_item.dart";
 import "package:photos/models/preview/preview_item_status.dart";
 import "package:photos/service_locator.dart";
-import "package:photos/services/file_magic_service.dart";
 import "package:photos/services/filedata/model/file_data.dart";
 import "package:photos/services/isolated_ffmpeg_service.dart";
 import "package:photos/services/machine_learning/compute_controller.dart";
@@ -52,7 +50,24 @@ class VideoPreviewService {
   final LinkedHashMap<int, PreviewItem> _items = LinkedHashMap();
   LinkedHashMap<int, EnteFile> fileQueue = LinkedHashMap();
   final int _maxPreviewSizeLimitForCache = 50 * 1024 * 1024; // 50 MB
+  static const int _targetBitrateKbps = 8000;
+  static const int _maxTargetBitrateKbps = 10000;
+  static const int _maxTargetBufferKbps = 20000;
+  static const int _hardwareTargetBitrateKbps = 10000;
+  static const int _hardwareMaxTargetBitrateKbps = 12000;
+  static const int _hardwareMaxTargetBufferKbps = 24000;
+  static const int _maxTargetFps = 60;
+  static const int _maxTargetDimension = 1080;
+  static const int _hlsSegmentDurationSeconds = 2;
+  static const int _keyframeIntervalSeconds = 2;
+  static const double _bitrateCapHeadroom = 1.3;
+  static const double _recreateStreamMinRatio = 0.5;
+  static const double _recreateSourceMinRatio = 0.8;
   Set<int>? _failureFiles;
+  int _streamSessionTotal = 0;
+  List<String> _currentEncodingSummaryLines = [];
+  int? _currentEncodingFileId;
+  Duration? _currentEncodingDuration;
 
   bool get _hasQueuedFile => fileQueue.isNotEmpty;
 
@@ -61,7 +76,6 @@ class VideoPreviewService {
         filesDB = FilesDB.instance,
         uploadLocksDB = UploadLocksDB.instance,
         ffmpegService = IsolatedFfmpegService.instance,
-        fileMagicService = FileMagicService.instance,
         cacheManager = DefaultCacheManager(),
         videoCacheManager = VideoCacheManager.instance,
         config = Configuration.instance {
@@ -89,7 +103,6 @@ class VideoPreviewService {
     this.serviceLocator,
     this.filesDB,
     this.uploadLocksDB,
-    this.fileMagicService,
     this.ffmpegService,
     this.cacheManager,
     this.videoCacheManager,
@@ -106,7 +119,6 @@ class VideoPreviewService {
   final ServiceLocator serviceLocator;
   final FilesDB filesDB;
   final UploadLocksDB uploadLocksDB;
-  final FileMagicService fileMagicService;
   final IsolatedFfmpegService ffmpegService;
   final DefaultCacheManager cacheManager;
   final CacheManager videoCacheManager;
@@ -150,6 +162,10 @@ class VideoPreviewService {
     }
     fileQueue.clear();
     _items.clear();
+    _streamSessionTotal = 0;
+    _currentEncodingSummaryLines = [];
+    _currentEncodingFileId = null;
+    _currentEncodingDuration = null;
   }
 
   /// Stop streaming immediately, cancels FFmpeg and network requests.
@@ -246,6 +262,11 @@ class VideoPreviewService {
         PreviewItemStatus.inQueue,
       );
       fileQueue[file.uploadedFileID!] = file;
+      if (_streamSessionTotal == 0) {
+        _streamSessionTotal = fileQueue.length + 1;
+      } else {
+        _streamSessionTotal += 1;
+      }
     }
 
     return true;
@@ -368,6 +389,342 @@ class VideoPreviewService {
     }
   }
 
+  ({int total, int current, int remaining}) getQueueProgress() {
+    final bool hasCurrent =
+        uploadingFileId >= 0 && _items.containsKey(uploadingFileId);
+    final int remaining = fileQueue.length + (hasCurrent ? 1 : 0);
+    var total = _streamSessionTotal > 0 ? _streamSessionTotal : remaining;
+    if (total < remaining) {
+      total = remaining;
+    }
+    final int current = hasCurrent ? (total - fileQueue.length) : 0;
+    return (total: total, current: current, remaining: remaining);
+  }
+
+  List<String> getCurrentEncodingSummary() {
+    if (_currentEncodingSummaryLines.isEmpty) return const [];
+    if (_currentEncodingFileId != null &&
+        _currentEncodingFileId != uploadingFileId) {
+      return const [];
+    }
+    return List.unmodifiable(_currentEncodingSummaryLines);
+  }
+
+  Future<double?> getCurrentEncodingProgress() async {
+    final item = uploadingFileId >= 0 ? _items[uploadingFileId] : null;
+    if (item == null || item.status != PreviewItemStatus.compressing) {
+      return null;
+    }
+    final duration = _currentEncodingDuration ??
+        (item.file.duration == null
+            ? null
+            : Duration(seconds: item.file.duration!));
+    return ffmpegService.getSessionProgress(
+      sessionId: _currentFfmpegSessionId,
+      duration: duration,
+    );
+  }
+
+  List<String> _preferredHardwareEncoders() {
+    if (Platform.isAndroid) return const ["h264_mediacodec"];
+    if (Platform.isIOS) return const ["h264_videotoolbox"];
+    if (Platform.isWindows) {
+      return const ["h264_nvenc", "h264_qsv", "h264_amf"];
+    }
+    return const [];
+  }
+
+  String _buildSoftwareVideoArgs({
+    required int targetBitrateKbps,
+    required int maxTargetBitrateKbps,
+    required int maxTargetBufferKbps,
+    required String keyframeArgs,
+  }) {
+    return "-c:v libx264 -b:v ${targetBitrateKbps}k "
+        "-maxrate ${maxTargetBitrateKbps}k -bufsize ${maxTargetBufferKbps}k "
+        "$keyframeArgs";
+  }
+
+  String _buildHardwareVideoArgs({
+    required String encoder,
+    required int targetBitrateKbps,
+    required int maxTargetBitrateKbps,
+    required int maxTargetBufferKbps,
+    required String keyframeArgs,
+  }) {
+    final encoderExtras = encoder == "h264_mediacodec"
+        // MediaCodec is picky about pixel format and B-frames.
+        ? "-pix_fmt nv12 -profile:v baseline -bf 0 "
+        : "";
+    return "-c:v $encoder $encoderExtras-b:v ${targetBitrateKbps}k "
+        "-maxrate ${maxTargetBitrateKbps}k "
+        "-bufsize ${maxTargetBufferKbps}k $keyframeArgs";
+  }
+
+  String _formatEncoderLabel(String encoder) {
+    if (encoder == "copy") return "copy (no re-encode)";
+    final normalized = encoder.toLowerCase();
+    final isHardware = normalized.contains("vaapi") ||
+        normalized.contains("videotoolbox") ||
+        normalized.contains("mediacodec") ||
+        normalized.contains("nvenc") ||
+        normalized.contains("qsv") ||
+        normalized.contains("amf");
+    return isHardware ? "$encoder (hardware)" : "$encoder (software)";
+  }
+
+  double? _calculateBitrateKbps(int sizeBytes, Duration? duration) {
+    if (duration == null) return null;
+    final microseconds = duration.inMicroseconds;
+    if (microseconds <= 0) return null;
+    return (sizeBytes * 8000) / microseconds;
+  }
+
+  int _capMaxBitrateForSource({
+    required int baseMaxKbps,
+    required double? sourceBitrateKbps,
+    double headroom = 1.1,
+  }) {
+    if (sourceBitrateKbps == null || sourceBitrateKbps <= 0) {
+      return baseMaxKbps;
+    }
+    final capped = (sourceBitrateKbps * headroom).round();
+    if (capped <= 0) return baseMaxKbps;
+    return capped < baseMaxKbps ? capped : baseMaxKbps;
+  }
+
+  int _capMaxBufferForBitrate({
+    required int baseBufferKbps,
+    required int maxBitrateKbps,
+  }) {
+    final candidate = maxBitrateKbps * 2;
+    return candidate < baseBufferKbps ? candidate : baseBufferKbps;
+  }
+
+  int _calculateGopSize({
+    required double fps,
+    required int intervalSeconds,
+  }) {
+    final frames = (fps * intervalSeconds).round();
+    if (frames <= 0) return 1;
+    return frames.clamp(1, 6000);
+  }
+
+  String _buildKeyframeArgs({
+    required int gopSize,
+    required int intervalSeconds,
+    bool disableSceneCut = false,
+    bool includeMinKeyint = true,
+  }) {
+    final buffer = StringBuffer()
+      ..write("-g $gopSize ");
+    if (includeMinKeyint) {
+      buffer.write("-keyint_min $gopSize ");
+    }
+    if (disableSceneCut) {
+      buffer.write("-sc_threshold 0 ");
+    }
+    buffer
+      ..write('-force_key_frames "expr:gte(t,n_forced*$intervalSeconds)" ');
+    return buffer.toString();
+  }
+
+  String _buildVideoFilters({
+    required bool reencodeVideo,
+    required bool rescaleVideo,
+    required bool applyFps,
+    required bool needsTonemap,
+    required String pixelFormat,
+  }) {
+    if (!reencodeVideo) return "";
+
+    final videoFilters = <String>[];
+    if (rescaleVideo) {
+      videoFilters.add(
+        "scale='if(lt(iw,ih),min($_maxTargetDimension,iw),-2)':'if(lt(iw,ih),-2,min($_maxTargetDimension,ih))'",
+      );
+    }
+    if (applyFps) videoFilters.add("fps=$_maxTargetFps");
+    if (needsTonemap) {
+      videoFilters.addAll([
+        'zscale=transfer=linear',
+        'tonemap=tonemap=hable:desat=0',
+        'zscale=primaries=709:transfer=709:matrix=709',
+      ]);
+    }
+    videoFilters.add("format=$pixelFormat");
+    return '-vf "${videoFilters.join(",")}" ';
+  }
+
+  ({int minStreamBitrateKbps, int minSourceBitrateKbps})
+      _getRecreateThresholds({
+    required double? sourceBitrateKbps,
+    required bool canUseHardwareEncoder,
+  }) {
+    final effectiveMaxTargetBitrateKbps = canUseHardwareEncoder
+        ? _hardwareMaxTargetBitrateKbps
+        : _maxTargetBitrateKbps;
+    final cappedTargetBitrateKbps = _capMaxBitrateForSource(
+      baseMaxKbps: effectiveMaxTargetBitrateKbps,
+      sourceBitrateKbps: sourceBitrateKbps,
+      headroom: _bitrateCapHeadroom,
+    );
+    final minStreamBitrateKbps =
+        (cappedTargetBitrateKbps * _recreateStreamMinRatio).round();
+    final minSourceBitrateKbps =
+        (effectiveMaxTargetBitrateKbps * _recreateSourceMinRatio).round();
+    return (
+      minStreamBitrateKbps: minStreamBitrateKbps,
+      minSourceBitrateKbps: minSourceBitrateKbps,
+    );
+  }
+
+  bool _shouldAutoRecreateStream(
+    EnteFile file,
+    PreviewInfo previewInfo, {
+    required int minStreamBitrateKbps,
+    required int minSourceBitrateKbps,
+  }) {
+    final durationSeconds = file.duration;
+    final sourceSize = file.fileSize;
+    if (durationSeconds == null || durationSeconds <= 0) return false;
+    if (sourceSize == null || sourceSize <= 0) return false;
+    if (previewInfo.objectSize <= 0) return false;
+
+    final duration = Duration(seconds: durationSeconds);
+    final streamBitrateKbps =
+        _calculateBitrateKbps(previewInfo.objectSize, duration);
+    if (streamBitrateKbps == null ||
+        streamBitrateKbps >= minStreamBitrateKbps) {
+      return false;
+    }
+
+    final sourceBitrateKbps = _calculateBitrateKbps(sourceSize, duration);
+    if (sourceBitrateKbps == null ||
+        sourceBitrateKbps < minSourceBitrateKbps) {
+      return false;
+    }
+
+    return true;
+  }
+
+  Future<void> _queueLowQualityStreamsForRecreate({
+    required List<EnteFile> files,
+    required Map<int, PreviewInfo> previewIds,
+    required Map<int, String> manualQueueFiles,
+  }) async {
+    final bool canUseHardwareEncoder =
+        _preferredHardwareEncoders().isNotEmpty;
+    final futures = <Future<void>>[];
+    var queuedCount = 0;
+
+    for (final file in files) {
+      final fileId = file.uploadedFileID;
+      if (fileId == null) continue;
+      if (manualQueueFiles.containsKey(fileId)) continue;
+      final previewInfo = previewIds[fileId];
+      if (previewInfo == null) continue;
+
+      final durationSeconds = file.duration;
+      final sourceSize = file.fileSize;
+      final double? sourceBitrateKbps =
+          durationSeconds == null || durationSeconds <= 0 || sourceSize == null
+              ? null
+              : _calculateBitrateKbps(
+                  sourceSize,
+                  Duration(seconds: durationSeconds),
+                );
+      final thresholds = _getRecreateThresholds(
+        sourceBitrateKbps: sourceBitrateKbps,
+        canUseHardwareEncoder: canUseHardwareEncoder,
+      );
+      final shouldRecreate = _shouldAutoRecreateStream(
+        file,
+        previewInfo,
+        minStreamBitrateKbps: thresholds.minStreamBitrateKbps,
+        minSourceBitrateKbps: thresholds.minSourceBitrateKbps,
+      );
+      if (!shouldRecreate) continue;
+
+      futures.add(uploadLocksDB.addToStreamQueue(fileId, 'recreate'));
+      manualQueueFiles[fileId] = 'recreate';
+      queuedCount += 1;
+    }
+
+    if (futures.isNotEmpty) {
+      await Future.wait(futures);
+      _logger.info(
+        "[auto-recreate] Queued $queuedCount low-quality streams for recreate",
+      );
+    }
+  }
+
+  void _updateEncodingSummary({
+    required int fileId,
+    required String? sourceCodec,
+    required bool reencodeVideo,
+    required bool rescaleVideo,
+    required bool applyFps,
+    required bool needsTonemap,
+    required int maxTargetDimension,
+    required int maxTargetFps,
+    String? encoderOverride,
+  }) {
+    final normalizedSource =
+        sourceCodec?.isNotEmpty ?? false ? sourceCodec!.toUpperCase() : "UNKNOWN";
+    final outputCodec = reencodeVideo ? "H.264" : normalizedSource;
+    final encoder = encoderOverride ?? (reencodeVideo ? "libx264" : "copy");
+    final processParts = <String>[];
+    if (reencodeVideo) {
+      processParts.add("re-encode");
+      if (rescaleVideo || needsTonemap) {
+        processParts.add("scale<=${maxTargetDimension}p");
+      }
+      if (applyFps) {
+        processParts.add("fps<=$maxTargetFps");
+      }
+      if (needsTonemap) {
+        processParts.add("HDR tonemap");
+      }
+    } else {
+      processParts.add("stream copy");
+    }
+
+    _currentEncodingFileId = fileId;
+    _currentEncodingSummaryLines = [
+      "Video: $outputCodec",
+      "Encoder: ${_formatEncoderLabel(encoder)}",
+      "Audio: AAC 128k",
+      "Processing: ${processParts.join(', ')}",
+      "Output: HLS single-file",
+    ];
+  }
+
+  Future<void> runBackgroundStreaming({
+    Duration maxDuration = const Duration(minutes: 15),
+  }) async {
+    if (!isVideoStreamingEnabled) return;
+
+    final isAllowed = _allowManualStream();
+    if (!isAllowed) return;
+
+    await _ensurePreviewIdsInitialized();
+    final result = await _putFilesForPreviewCreation();
+    if (!result) {
+      computeController.releaseCompute(stream: true);
+      return;
+    }
+
+    final deadline = DateTime.now().add(maxDuration);
+    while (_items.isNotEmpty && DateTime.now().isBefore(deadline)) {
+      await Future.delayed(const Duration(seconds: 2));
+    }
+
+    if (_items.isNotEmpty) {
+      stop("background time limit");
+    }
+  }
+
   Future<void> chunkAndUploadVideo(
     BuildContext? ctx,
     EnteFile enteFile, {
@@ -425,7 +782,7 @@ class VideoPreviewService {
       _logger.info(
         "Starting video preview generation for ${enteFile.displayName}",
       );
-      // elimination case for <=10 MB with H.264
+      // preflight checks for preview generation
       final isManual =
           await uploadLocksDB.isInStreamQueue(enteFile.uploadedFileID!);
       var (props, result, file) =
@@ -476,10 +833,15 @@ class VideoPreviewService {
         error = "Unable to fetch file";
         return;
       }
+      final inputFile = file;
 
       // check metadata for bitrate, codec, color space
-      props ??= await getVideoPropsAsync(file);
-      final fileSize = enteFile.fileSize ?? file.lengthSync();
+      props ??= await getVideoPropsAsync(inputFile);
+      _currentEncodingDuration = props?.duration ??
+          (enteFile.duration == null
+              ? null
+              : Duration(seconds: enteFile.duration!));
+      final fileSize = enteFile.fileSize ?? inputFile.lengthSync();
 
       final videoData = List.from(
         props?.propData?["streams"] ?? [],
@@ -487,10 +849,13 @@ class VideoPreviewService {
 
       final codec = videoData["codec_name"]?.toString().toLowerCase();
       final isH264 = codec?.contains("h264") ?? false;
+      final hasBFrames = int.tryParse(videoData["has_b_frames"]?.toString() ?? "");
 
-      final bitrate = props?.duration?.inSeconds != null
-          ? (fileSize * 8) / props!.duration!.inSeconds
-          : null;
+      final Duration? sourceDuration = _currentEncodingDuration;
+      final double? sourceBitrateKbps =
+          _calculateBitrateKbps(fileSize, sourceDuration);
+      final int? sourceWidth = props?.width;
+      final int? sourceHeight = props?.height;
 
       final colorTransfer =
           videoData["color_transfer"]?.toString().toLowerCase();
@@ -518,73 +883,213 @@ class VideoPreviewService {
         'Generating HLS Playlist ${enteFile.displayName} at $prefix/output.m3u8',
       );
 
-      final reencodeVideo =
-          !(isH264 && bitrate != null && bitrate <= 4000 * 1000);
-      final rescaleVideo = !(bitrate != null && bitrate <= 2000 * 1000);
+      final hardwareEncoders = _preferredHardwareEncoders();
+      final bool canUseHardwareEncoder = hardwareEncoders.isNotEmpty;
       final needsTonemap = isHDR;
-      final applyFPS = (double.tryParse(props?.fps ?? "") ?? 100) > 30;
+      final applyFPS =
+          (double.tryParse(props?.fps ?? "") ?? 100) > _maxTargetFps;
+      final int effectiveMaxTargetBitrateKbps = canUseHardwareEncoder
+          ? _hardwareMaxTargetBitrateKbps
+          : _maxTargetBitrateKbps;
+      final bool exceedsBitrate = sourceBitrateKbps != null &&
+          sourceBitrateKbps > effectiveMaxTargetBitrateKbps;
+      final bool needsScale = sourceWidth != null &&
+          sourceHeight != null &&
+          (sourceWidth > _maxTargetDimension ||
+              sourceHeight > _maxTargetDimension);
+      final double rawFps =
+          double.tryParse(props?.fps ?? "") ?? _maxTargetFps.toDouble();
+      final double targetFps =
+          applyFPS ? _maxTargetFps.toDouble() : rawFps;
+      final int gopSize = _calculateGopSize(
+        fps: targetFps,
+        intervalSeconds: _keyframeIntervalSeconds,
+      );
+      final String softwareKeyframeArgs = _buildKeyframeArgs(
+        gopSize: gopSize,
+        intervalSeconds: _keyframeIntervalSeconds,
+        disableSceneCut: true,
+      );
+      final String hardwareKeyframeArgs = _buildKeyframeArgs(
+        gopSize: gopSize,
+        intervalSeconds: _keyframeIntervalSeconds,
+        disableSceneCut: true,
+        includeMinKeyint: true,
+      );
+      final reencodeVideo = !isH264 ||
+          exceedsBitrate ||
+          needsScale ||
+          applyFPS ||
+          (Platform.isAndroid && (hasBFrames ?? 0) > 0) ||
+          needsTonemap;
+      final rescaleVideo = needsScale;
 
+      final int targetBitrateKbps = canUseHardwareEncoder
+          ? _hardwareTargetBitrateKbps
+          : _targetBitrateKbps;
+      final int maxTargetBitrateKbps = canUseHardwareEncoder
+          ? _hardwareMaxTargetBitrateKbps
+          : _maxTargetBitrateKbps;
+      final int maxTargetBufferKbps = _capMaxBufferForBitrate(
+        baseBufferKbps: canUseHardwareEncoder
+            ? _hardwareMaxTargetBufferKbps
+            : _maxTargetBufferKbps,
+        maxBitrateKbps: maxTargetBitrateKbps,
+      );
+
+      final String softwareFilters = _buildVideoFilters(
+        reencodeVideo: reencodeVideo,
+        rescaleVideo: rescaleVideo,
+        applyFps: applyFPS,
+        needsTonemap: needsTonemap,
+        pixelFormat: "yuv420p",
+      );
+      final String hardwareFilters = _buildVideoFilters(
+        reencodeVideo: reencodeVideo,
+        rescaleVideo: rescaleVideo,
+        applyFps: applyFPS,
+        needsTonemap: needsTonemap,
+        pixelFormat: "nv12",
+      );
+
+      final audioArgs = '-c:a aac -b:a 128k ';
+      final hlsArgs = '-f hls -hls_time $_hlsSegmentDurationSeconds '
+          '-hls_flags single_file '
+          '-hls_list_size 0 -hls_key_info_file ${keyinfo.path} ';
+      String? fallbackCommand;
+      String videoArgs = '-c:v copy ';
+      String encoderLabel = "copy";
+      List<String> hardwareEncodersToTry = const [];
       String filters = "";
-
       if (reencodeVideo) {
-        final videoFilters = <String>[];
-
-        if (rescaleVideo || needsTonemap) {
-          // scale smaller dimension to 720p (or keep original if less than 720p)
-          // portrait: scale width to min(720,iw), landscape: scale height to min(720,ih)
-          videoFilters.add(
-            "scale='if(lt(iw,ih),min(720,iw),-2)':'if(lt(iw,ih),-2,min(720,ih))'",
+        final softwareVideoArgs = _buildSoftwareVideoArgs(
+          targetBitrateKbps: targetBitrateKbps,
+          maxTargetBitrateKbps: maxTargetBitrateKbps,
+          maxTargetBufferKbps: maxTargetBufferKbps,
+          keyframeArgs: softwareKeyframeArgs,
+        );
+        if (hardwareEncoders.isNotEmpty) {
+          hardwareEncodersToTry = hardwareEncoders;
+          encoderLabel = hardwareEncodersToTry.first;
+          filters = hardwareFilters;
+          videoArgs = _buildHardwareVideoArgs(
+            encoder: encoderLabel,
+            targetBitrateKbps: targetBitrateKbps,
+            maxTargetBitrateKbps: maxTargetBitrateKbps,
+            maxTargetBufferKbps: maxTargetBufferKbps,
+            keyframeArgs: hardwareKeyframeArgs,
           );
-
-          // reduce fps to 30 if it is more than 30
-          if (applyFPS) videoFilters.add("fps=30");
+          fallbackCommand =
+              '$softwareFilters$softwareVideoArgs$audioArgs$hlsArgs';
+        } else {
+          encoderLabel = "libx264";
+          filters = softwareFilters;
+          videoArgs = softwareVideoArgs;
         }
+      }
+      _updateEncodingSummary(
+        fileId: enteFile.uploadedFileID!,
+        sourceCodec: codec,
+        reencodeVideo: reencodeVideo,
+        rescaleVideo: rescaleVideo,
+        applyFps: applyFPS,
+        needsTonemap: needsTonemap,
+        maxTargetDimension: _maxTargetDimension,
+        maxTargetFps: _maxTargetFps,
+        encoderOverride: encoderLabel,
+      );
 
-        if (needsTonemap) {
-          // apply tonemapping for HDR videos
-          videoFilters.addAll([
-            'zscale=transfer=linear',
-            'tonemap=tonemap=hable:desat=0',
-            'zscale=primaries=709:transfer=709:matrix=709',
-          ]);
-        }
+      var outputPlaylistPath = "$prefix/output.m3u8";
+      var outputVideoPath = "$prefix/output.ts";
+      final command = '$filters$videoArgs$audioArgs$hlsArgs';
 
-        videoFilters.add("format=yuv420p");
-
-        filters = '-vf "${videoFilters.join(",")}" ';
+      Future<Map> runPlaylistCommand(
+        String ffmpegCommand, {
+        required String outputPath,
+      }) async {
+        return await ffmpegService
+            .runFfmpegCancellable(
+              '-y -i "${inputFile.path}" $ffmpegCommand"$outputPath"',
+              (id) {
+                _currentFfmpegSessionId = id;
+                _logger.info("FFmpeg[$id]: $ffmpegCommand");
+              },
+            )
+            .whenComplete(() => _currentFfmpegSessionId = null)
+            .onError((error, stackTrace) {
+              _logger.warning("FFmpeg command failed", error, stackTrace);
+              return {};
+            });
       }
 
-      final command =
-          // scaling, fps, tonemapping
-          '$filters'
-          // video encoding with maxrate cap at 2000kbps to preserve smaller bitrates
-          '${reencodeVideo ? '-c:v libx264 -maxrate 2000k -bufsize 4000k ' : '-c:v copy '}'
-          // audio encoding
-          '-c:a aac -b:a 128k '
-          // hls options
-          '-f hls -hls_flags single_file '
-          '-hls_list_size 0 -hls_key_info_file ${keyinfo.path} ';
-
-      final playlistGenResult = await ffmpegService
-          .runFfmpegCancellable(
-            '-i "${file.path}" $command$prefix/output.m3u8',
-            (id) {
-              _currentFfmpegSessionId = id;
-              _logger.info("FFmpeg[$id]: $command");
-            },
-          )
-          .whenComplete(() => _currentFfmpegSessionId = null)
-          .onError((error, stackTrace) {
-            _logger.warning("FFmpeg command failed", error, stackTrace);
-            return {};
-          });
+      var playlistGenResult = await runPlaylistCommand(
+        command,
+        outputPath: outputPlaylistPath,
+      );
 
       if (_items.isEmpty) {
         Directory(prefix).delete(recursive: true).ignore();
         return;
       }
 
-      final playlistGenReturnCode = playlistGenResult["returnCode"] as int?;
+      var playlistGenReturnCode = playlistGenResult["returnCode"] as int?;
+      if (ReturnCode.success != playlistGenReturnCode &&
+          hardwareEncodersToTry.length > 1) {
+        for (final encoder in hardwareEncodersToTry.skip(1)) {
+          _logger.warning(
+            "Hardware encoding failed, retrying with $encoder",
+          );
+          encoderLabel = encoder;
+          final retryVideoArgs = _buildHardwareVideoArgs(
+            encoder: encoderLabel,
+            targetBitrateKbps: targetBitrateKbps,
+            maxTargetBitrateKbps: maxTargetBitrateKbps,
+            maxTargetBufferKbps: maxTargetBufferKbps,
+            keyframeArgs: hardwareKeyframeArgs,
+          );
+          _updateEncodingSummary(
+            fileId: enteFile.uploadedFileID!,
+            sourceCodec: codec,
+            reencodeVideo: reencodeVideo,
+            rescaleVideo: rescaleVideo,
+            applyFps: applyFPS,
+            needsTonemap: needsTonemap,
+            maxTargetDimension: _maxTargetDimension,
+            maxTargetFps: _maxTargetFps,
+            encoderOverride: encoderLabel,
+          );
+          playlistGenResult = await runPlaylistCommand(
+            '$hardwareFilters$retryVideoArgs$audioArgs$hlsArgs',
+            outputPath: outputPlaylistPath,
+          );
+          playlistGenReturnCode = playlistGenResult["returnCode"] as int?;
+          if (ReturnCode.success == playlistGenReturnCode) {
+            break;
+          }
+        }
+      }
+      if (ReturnCode.success != playlistGenReturnCode &&
+          fallbackCommand != null) {
+        _logger.warning(
+          "Hardware encoding failed, retrying with libx264",
+        );
+        _updateEncodingSummary(
+          fileId: enteFile.uploadedFileID!,
+          sourceCodec: codec,
+          reencodeVideo: reencodeVideo,
+          rescaleVideo: rescaleVideo,
+          applyFps: applyFPS,
+          needsTonemap: needsTonemap,
+          maxTargetDimension: _maxTargetDimension,
+          maxTargetFps: _maxTargetFps,
+          encoderOverride: "libx264",
+        );
+        playlistGenResult = await runPlaylistCommand(
+          fallbackCommand!,
+          outputPath: outputPlaylistPath,
+        );
+        playlistGenReturnCode = playlistGenResult["returnCode"] as int?;
+      }
 
       String? objectId;
       int? objectSize;
@@ -604,8 +1109,8 @@ class VideoPreviewService {
 
           _logger.info('Playlist Generated ${enteFile.displayName}');
 
-          final playlistFile = File("$prefix/output.m3u8");
-          final previewFile = File("$prefix/output.ts");
+          final playlistFile = File(outputPlaylistPath);
+          final previewFile = File(outputVideoPath);
           final result = await _uploadPreviewVideo(enteFile, previewFile);
 
           objectId = result.$1;
@@ -614,7 +1119,7 @@ class VideoPreviewService {
           // Fetch resolution of generated stream by decrypting a single frame
           final playlistFrameResult = await ffmpegService
               .runFfmpeg(
-            '-allowed_extensions ALL -i "$prefix/output.m3u8" -frames:v 1 -c copy "$prefix/frame.ts"',
+            '-allowed_extensions ALL -i "$outputPlaylistPath" -frames:v 1 -c copy "$prefix/frame.ts"',
           )
               .onError((error, stackTrace) {
             _logger.warning(
@@ -1079,24 +1584,6 @@ class VideoPreviewService {
     EnteFile enteFile, [
     bool isManual = false,
   ]) async {
-    if ((enteFile.pubMagicMetadata?.sv ?? 0) == 1) {
-      _logger.info("Skip Preview due to sv=1 for  ${enteFile.displayName}");
-      return (null, true, null);
-    }
-    if (!isManual) {
-      if (enteFile.fileSize == null || enteFile.duration == null) {
-        _logger.warning(
-          "Skip Preview due to misisng size/duration for ${enteFile.displayName}",
-        );
-        return (null, true, null);
-      }
-      final int size = enteFile.fileSize!;
-      final int duration = enteFile.duration!;
-      if (size >= 500 * 1024 * 1024 || duration > 60) {
-        _logger.info("Skip Preview due to size: $size or duration: $duration");
-        return (null, true, null);
-      }
-    }
     FFProbeProps? props;
     File? file;
     bool skipFile = false;
@@ -1111,22 +1598,6 @@ class VideoPreviewService {
         file = await getFile(enteFile, isOrigin: true);
         if (file != null) {
           props = await getVideoPropsAsync(file);
-          final videoData = List.from(
-            props?.propData?["streams"] ?? [],
-          ).firstWhereOrNull((e) => e["type"] == "video");
-          final codec = videoData["codec_name"]?.toString().toLowerCase();
-          skipFile = codec?.contains("h264") ?? false;
-
-          if (skipFile) {
-            _logger.info(
-              "[init] Ignoring file ${enteFile.displayName} for preview due to codec",
-            );
-            await fileMagicService.updatePublicMagicMetadata(
-              [enteFile],
-              {streamVersionKey: 1},
-            );
-            return (props, skipFile, file);
-          }
         }
       }
     } catch (e, sT) {
@@ -1135,8 +1606,8 @@ class VideoPreviewService {
     return (props, skipFile, file);
   }
 
-  // generate stream for all files after cutoff date
-  // returns false if it fails to launch chuncking function
+  // generate stream for all eligible files
+  // returns false if it fails to launch chunking function
   Future<bool> _putFilesForPreviewCreation() async {
     if (!isVideoStreamingEnabled || !await canUseHighBandwidth()) return false;
 
@@ -1170,13 +1641,19 @@ class VideoPreviewService {
     } catch (_) {}
 
     final files = await _getFiles(
-      beginDate: DateTime.now().subtract(const Duration(days: 60)),
+      beginDate: null,
       onlyFilesWithLocalId: true,
     );
     final previewIds = fileDataService.previewIds;
 
+    await _queueLowQualityStreamsForRecreate(
+      files: files,
+      previewIds: previewIds,
+      manualQueueFiles: manualQueueFiles,
+    );
+
     _logger.info(
-      "[init] Found ${files.length} files in last 60 days, ${manualQueueFiles.length} manual queue files: ${manualQueueFiles.keys.toList()}",
+      "[init] Found ${files.length} eligible files, ${manualQueueFiles.length} manual queue files: ${manualQueueFiles.keys.toList()}",
     );
 
     // Add manual queue files first (they have priority)
@@ -1192,7 +1669,7 @@ class VideoPreviewService {
         continue;
       }
 
-      // First try to find the file in the 60-day list
+      // First try to find the file in the eligible list
       var queueFile = files.firstWhereOrNull(
         (f) => f.uploadedFileID == queueFileId,
       );
@@ -1272,7 +1749,9 @@ class VideoPreviewService {
     }
 
     final totalFiles = fileQueue.length;
+    _streamSessionTotal = totalFiles;
     if (totalFiles == 0) {
+      _streamSessionTotal = 0;
       _logger.fine("[init] No preview to cache");
       return false;
     }

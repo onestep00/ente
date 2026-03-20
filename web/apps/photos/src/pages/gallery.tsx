@@ -56,6 +56,7 @@ import { type FileViewerInitialSidebar } from "ente-gallery/components/viewer/Fi
 import { CollectionSubType, type Collection } from "ente-media/collection";
 import { type EnteFile } from "ente-media/file";
 import { ItemVisibility } from "ente-media/file-metadata";
+import { FileType } from "ente-media/file-type";
 import {
     hasPendingAlbumToJoin,
     processPendingAlbumJoin,
@@ -1460,6 +1461,23 @@ const Page: React.FC = () => {
         }
         return count;
     }, [favoriteFileIDs, selected]);
+    const selectedFilesForBar = useMemo(
+        () => getSelectedFiles(selected, filteredFiles),
+        [selected, filteredFiles],
+    );
+    const selectedOwnVideoCount = useMemo(() => {
+        if (!user) return 0;
+        let count = 0;
+        for (const file of selectedFilesForBar) {
+            if (
+                file.metadata.fileType == FileType.video &&
+                file.ownerID == user.id
+            ) {
+                count += 1;
+            }
+        }
+        return count;
+    }, [selectedFilesForBar, user?.id]);
 
     const handleUpdateCollectionCover = useCallback(
         async (coverID: number) => {
@@ -1849,6 +1867,7 @@ const Page: React.FC = () => {
                         selectedFileCount={selected.count}
                         selectedOwnFileCount={selected.ownCount}
                         selectedFavoriteCount={selectedFavoriteCount}
+                        selectedOwnVideoCount={selectedOwnVideoCount}
                         onClearSelection={clearSelection}
                         onRemoveFilesFromCollection={
                             handleRemoveFilesFromCollection

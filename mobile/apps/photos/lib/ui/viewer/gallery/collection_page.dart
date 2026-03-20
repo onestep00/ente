@@ -66,6 +66,7 @@ class CollectionPage extends StatelessWidget {
           creationEndTime,
           limit: limit,
           asc: asc,
+          sortBy: c.collection.pubMagicMetadata.resolvedSortBy,
         );
         // hide ignored files from home page UI
         final ignoredIDs =

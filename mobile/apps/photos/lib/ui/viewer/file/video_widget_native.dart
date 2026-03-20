@@ -31,6 +31,7 @@ import "package:photos/ui/notification/toast.dart";
 import "package:photos/ui/viewer/file/native_video_player_controls/play_pause_button.dart";
 import "package:photos/ui/viewer/file/native_video_player_controls/seek_bar.dart";
 import "package:photos/ui/viewer/file/thumbnail_widget.dart";
+import "package:photos/ui/viewer/file/video_fit_mode.dart";
 import "package:photos/ui/viewer/file/video_stream_change.dart";
 import "package:photos/ui/viewer/file/zoomable_video_viewer.dart";
 import "package:photos/utils/dialog_util.dart";
@@ -88,12 +89,25 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
   final _debouncer = Debouncer(
     const Duration(milliseconds: 2000),
   );
+  final _scrubDebouncer = Debouncer(
+    const Duration(milliseconds: 50),
+    executionInterval: const Duration(milliseconds: 50),
+  );
+  final _scrubProgressNotifier = ValueNotifier<double?>(null);
   StreamSubscription<PlaybackEvent>? _subscription;
   StreamSubscription<StreamSwitchedEvent>? _streamSwitchedSubscription;
   StreamSubscription<DownloadTask>? downloadTaskSubscription;
   late final StreamSubscription<FileCaptionUpdatedEvent>
       _captionUpdatedSubscription;
   int position = 0;
+  bool _isScrubbing = false;
+  double _scrubSecondsPerPixel = 0;
+  int _scrubTargetMs = 0;
+  int _scrubDurationMs = 0;
+  DateTime? _lastPositionUiUpdate;
+  final Map<int, Offset> _activePointers = {};
+  bool _isPinching = false;
+  VideoFitMode? _fitModeOverride;
   final _transformationController = TransformationController();
   bool _isZooming = false;
 
@@ -258,6 +272,8 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
     _isSeeking.removeListener(_seekListener);
     _isSeeking.dispose();
     _debouncer.cancelDebounceTimer();
+    _scrubDebouncer.cancelDebounceTimer();
+    _scrubProgressNotifier.dispose();
     _captionUpdatedSubscription.cancel();
     _transformationController.dispose();
     EnteWakeLockService.instance
@@ -276,6 +292,7 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
 
   @override
   Widget build(BuildContext context) {
+    final fitMode = _currentFitMode(context);
     return Hero(
       tag: widget.tagPrefix! + widget.file.tag,
       child: VisibilityDetector(
@@ -311,52 +328,69 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
                 : Stack(
                     key: const ValueKey("video_ready"),
                     children: [
-                      ZoomableVideoViewer(
-                        transformationController: _transformationController,
-                        onInteractionLockChanged: _onInteractionLockChanged,
-                        child: Center(
-                          child: AspectRatio(
-                            aspectRatio: aspectRatio ?? 1,
-                            child: NativeVideoPlayerView(
-                              onViewReady: _initializeController,
-                            ),
-                          ),
+                      Positioned.fill(
+                        child: ZoomableVideoViewer(
+                          transformationController: _transformationController,
+                          onInteractionLockChanged: _onInteractionLockChanged,
+                          child: _buildVideoViewport(fitMode),
                         ),
                       ),
-                      GestureDetector(
-                        behavior: HitTestBehavior.translucent,
-                        onTap: widget.isFromMemories
-                            ? null
-                            : () {
-                                _showControls.value = !_showControls.value;
-                                if (widget.playbackCallback != null) {
-                                  widget.playbackCallback!(
-                                    !_showControls.value,
+                      ValueListenableBuilder(
+                        valueListenable: _showControls,
+                        builder: (context, showControls, _) {
+                          final enableScrub = !widget.isFromMemories;
+                          return Listener(
+                            behavior: HitTestBehavior.translucent,
+                            onPointerDown: _handlePointerDown,
+                            onPointerMove: _handlePointerMove,
+                            onPointerUp: _handlePointerEnd,
+                            onPointerCancel: _handlePointerEnd,
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.translucent,
+                              onTap: widget.isFromMemories
+                                  ? null
+                                  : () {
+                                      _showControls.value =
+                                          !_showControls.value;
+                                      if (widget.playbackCallback != null) {
+                                        widget.playbackCallback!(
+                                          !_showControls.value,
+                                          FullScreenRequestReason.userInteraction,
+                                        );
+                                      }
+                                    },
+                              onHorizontalDragStart:
+                                  enableScrub ? _onScrubStart : null,
+                              onHorizontalDragUpdate:
+                                  enableScrub ? _onScrubUpdate : null,
+                              onHorizontalDragEnd:
+                                  enableScrub ? _onScrubEnd : null,
+                              onHorizontalDragCancel:
+                                  enableScrub ? _onScrubCancel : null,
+                              onLongPress: () {
+                                if (widget.isFromMemories) {
+                                  widget.playbackCallback?.call(
+                                    false,
                                     FullScreenRequestReason.userInteraction,
                                   );
+                                  _controller?.pause();
                                 }
                               },
-                        onLongPress: () {
-                          if (widget.isFromMemories) {
-                            widget.playbackCallback?.call(
-                              false,
-                              FullScreenRequestReason.userInteraction,
-                            );
-                            _controller?.pause();
-                          }
+                              onLongPressUp: () {
+                                if (widget.isFromMemories) {
+                                  widget.playbackCallback?.call(
+                                    true,
+                                    FullScreenRequestReason.userInteraction,
+                                  );
+                                  _controller?.play();
+                                }
+                              },
+                              child: Container(
+                                constraints: const BoxConstraints.expand(),
+                              ),
+                            ),
+                          );
                         },
-                        onLongPressUp: () {
-                          if (widget.isFromMemories) {
-                            widget.playbackCallback?.call(
-                              true,
-                              FullScreenRequestReason.userInteraction,
-                            );
-                            _controller?.play();
-                          }
-                        },
-                        child: Container(
-                          constraints: const BoxConstraints.expand(),
-                        ),
                       ),
                       widget.isFromMemories
                           ? const SizedBox.shrink()
@@ -390,6 +424,7 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
                                 ),
                               ),
                             ),
+                      _buildScrubOverlay(),
                       widget.isFromMemories
                           ? const SizedBox.shrink()
                           : Positioned(
@@ -436,6 +471,11 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
                                                   isSeeking: _isSeeking,
                                                   position: position,
                                                   file: widget.file,
+                                                  scrubPositionNotifier:
+                                                      _scrubProgressNotifier,
+                                                  fitMode: fitMode,
+                                                  onToggleFitMode: () =>
+                                                      _toggleFitMode(fitMode),
                                                 )
                                               : const SizedBox();
                                         },
@@ -492,9 +532,21 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
         _onPlaybackReady();
         break;
       case PlaybackPositionChangedEvent():
+        if (_isScrubbing || _isSeeking.value) {
+          break;
+        }
         position = event.positionInMilliseconds;
-        if (mounted) {
-          setState(() {});
+        if (!_showControls.value) {
+          break;
+        }
+        final now = DateTime.now();
+        if (_lastPositionUiUpdate == null ||
+            now.difference(_lastPositionUiUpdate!) >=
+                const Duration(milliseconds: 250)) {
+          _lastPositionUiUpdate = now;
+          if (mounted) {
+            setState(() {});
+          }
         }
         break;
       case PlaybackEndedEvent():
@@ -529,7 +581,179 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
     }
   }
 
+  int? _videoDurationMs() {
+    final fileDuration = widget.file.duration;
+    if (fileDuration != null && fileDuration > 0) {
+      return fileDuration * 1000;
+    }
+    final controllerDuration = _controller?.videoInfo?.durationInMilliseconds;
+    if (controllerDuration != null && controllerDuration > 0) {
+      return controllerDuration;
+    }
+    return null;
+  }
+
+  void _onScrubStart(DragStartDetails _) {
+    if (_isPinching) return;
+    if (_controller == null) return;
+    final durationMs = _videoDurationMs();
+    if (durationMs == null || durationMs <= 0) return;
+    _scrubDurationMs = durationMs;
+    _scrubSecondsPerPixel = _secondsPerPixel(durationMs);
+    _scrubTargetMs = _controller!.playbackPosition.inMilliseconds;
+    _scrubTargetMs = _scrubTargetMs.clamp(0, _scrubDurationMs) as int;
+    _isScrubbing = true;
+    _isSeeking.value = true;
+    _showControls.value = true;
+    _scrubProgressNotifier.value = _scrubTargetMs / _scrubDurationMs;
+    position = _scrubTargetMs;
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _onScrubUpdate(DragUpdateDetails details) {
+    if (_isPinching) return;
+    if (!_isScrubbing || _scrubDurationMs <= 0) return;
+    if (_scrubSecondsPerPixel == 0) return;
+    final deltaSeconds = details.delta.dx * _scrubSecondsPerPixel;
+    if (deltaSeconds == 0) return;
+    _scrubTargetMs += (deltaSeconds * 1000).round();
+    _scrubTargetMs = _scrubTargetMs.clamp(0, _scrubDurationMs) as int;
+    _seekToScrubTarget();
+  }
+
+  void _onScrubEnd(DragEndDetails _) {
+    if (_isPinching) return;
+    if (!_isScrubbing) return;
+    _isScrubbing = false;
+    _seekToScrubTarget();
+    _isSeeking.value = false;
+    _scrubProgressNotifier.value = null;
+  }
+
+  void _onScrubCancel() {
+    _isScrubbing = false;
+    _isSeeking.value = false;
+    _scrubProgressNotifier.value = null;
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _seekToScrubTarget() {
+    position = _scrubTargetMs;
+    if (mounted) {
+      setState(() {});
+    }
+    if (_scrubDurationMs > 0) {
+      _scrubProgressNotifier.value = _scrubTargetMs / _scrubDurationMs;
+    }
+    _scrubDebouncer.run(() async {
+      await _controller?.seekTo(Duration(milliseconds: _scrubTargetMs));
+    });
+  }
+
+  double _secondsPerPixel(int durationMs) {
+    final width = MediaQuery.sizeOf(context).width;
+    if (width <= 0) return 0;
+    final secondsPerPixel = durationMs / 1000 / width;
+    const minSecondsPerPixel = 0.05;
+    const maxSecondsPerPixel = 2.0;
+    if (secondsPerPixel < minSecondsPerPixel) return minSecondsPerPixel;
+    if (secondsPerPixel > maxSecondsPerPixel) return maxSecondsPerPixel;
+    return secondsPerPixel;
+  }
+
+  VideoFitMode _currentFitMode(BuildContext context) {
+    final override = _fitModeOverride;
+    if (override != null) return override;
+    final ratio = aspectRatio;
+    final viewport = MediaQuery.sizeOf(context);
+    if (ratio == null ||
+        ratio <= 0 ||
+        viewport.width <= 0 ||
+        viewport.height <= 0) {
+      return VideoFitMode.fitWidth;
+    }
+    return autoVideoFitMode(
+      videoAspectRatio: ratio,
+      viewportAspectRatio: viewport.width / viewport.height,
+    );
+  }
+
+  void _toggleFitMode(VideoFitMode currentMode) {
+    setState(() {
+      _fitModeOverride = nextVideoFitMode(currentMode);
+      _resetZoom();
+    });
+  }
+
+  void _resetZoom() {
+    _transformationController.value = Matrix4.identity();
+    _isPinching = false;
+    _activePointers.clear();
+  }
+
+  void _handlePointerDown(PointerDownEvent event) {
+    _activePointers[event.pointer] = event.position;
+    if (_activePointers.length == 2) {
+      if (_isScrubbing) {
+        _onScrubCancel();
+      }
+      _isPinching = true;
+      _debouncer.cancelDebounceTimer();
+      _showControls.value = true;
+    }
+  }
+
+  void _handlePointerMove(PointerMoveEvent event) {
+    if (!_activePointers.containsKey(event.pointer)) return;
+    _activePointers[event.pointer] = event.position;
+  }
+
+  void _handlePointerEnd(PointerEvent event) {
+    _activePointers.remove(event.pointer);
+    if (_activePointers.length < 2) {
+      _isPinching = false;
+    }
+  }
+
+  Widget _buildScrubOverlay() {
+    if (!_isScrubbing) {
+      return const SizedBox.shrink();
+    }
+    final scrubSeconds = (_scrubTargetMs / 1000).floor();
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: Center(
+          child: Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: 16,
+              vertical: 8,
+            ),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.6),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: strokeFaintDark,
+                width: 1,
+              ),
+            ),
+            child: Text(
+              secondsToDuration(scrubSeconds),
+              style: getEnteTextTheme(context).h3Bold.copyWith(
+                    color: textBaseDark,
+                  ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   void _onPlaybackStatusChanged() {
+    _updateAspectRatioFromController();
     if (widget.isFromMemories) return;
     final duration = widget.file.duration != null
         ? widget.file.duration! * 1000
@@ -569,6 +793,21 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
     _handleWakeLockOnPlaybackChanges();
   }
 
+  void _updateAspectRatioFromController() {
+    final info = _controller?.videoInfo;
+    if (info == null || info.width == 0 || info.height == 0) {
+      return;
+    }
+    final ratio = info.width / info.height;
+    if (ratio <= 0) return;
+    if (aspectRatio == null || (aspectRatio! - ratio).abs() > 0.001) {
+      aspectRatio = ratio;
+      if (mounted) {
+        setState(() {});
+      }
+    }
+  }
+
   void _onError(String errorMessage) {
     //This doesn't work all the time
     _logger.severe(
@@ -581,6 +820,7 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
   Future<void> _onPlaybackReady() async {
     if (_isPlaybackReady.value) return;
     await _controller!.play();
+    _updateAspectRatioFromController();
     final durationInSeconds = durationToSeconds(duration) ?? 10;
     widget.onFinalFileLoad?.call(memoryDuration: durationInSeconds);
     unawaited(_controller!.setVolume(1));
@@ -651,6 +891,53 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
         wakeLockFor: WakeLockFor.videoPlayback,
       );
     }
+  }
+  Widget _buildVideoViewport(VideoFitMode fitMode) {
+    final videoAspectRatio =
+        aspectRatio != null && aspectRatio! > 0 ? aspectRatio! : 1.0;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final maxWidth = constraints.maxWidth;
+        final maxHeight = constraints.maxHeight;
+        if (maxWidth <= 0 || maxHeight <= 0) {
+          return const SizedBox.shrink();
+        }
+        double targetWidth;
+        double targetHeight;
+        switch (fitMode) {
+          case VideoFitMode.fitWidth:
+            targetWidth = maxWidth;
+            targetHeight = maxWidth / videoAspectRatio;
+            break;
+          case VideoFitMode.fitHeight:
+            targetHeight = maxHeight;
+            targetWidth = maxHeight * videoAspectRatio;
+            break;
+          case VideoFitMode.full:
+            final containerAspect = maxWidth / maxHeight;
+            if (videoAspectRatio >= containerAspect) {
+              targetWidth = maxWidth;
+              targetHeight = maxWidth / videoAspectRatio;
+            } else {
+              targetHeight = maxHeight;
+              targetWidth = maxHeight * videoAspectRatio;
+            }
+            break;
+        }
+        return ClipRect(
+          child: OverflowBox(
+            alignment: Alignment.center,
+            minWidth: targetWidth,
+            maxWidth: targetWidth,
+            minHeight: targetHeight,
+            maxHeight: targetHeight,
+            child: NativeVideoPlayerView(
+              onViewReady: _initializeController,
+            ),
+          ),
+        );
+      },
+    );
   }
 
   Widget _getLoadingWidget() {
@@ -802,11 +1089,7 @@ class _VideoWidgetNativeState extends State<VideoWidgetNative>
       await metadataController.initialize().timeout(const Duration(seconds: 4));
       final value = metadataController.value;
       final probeAspectRatio = value.aspectRatio;
-      // Always prefer the probed aspect ratio over file metadata dimensions,
-      // because AVPlayer correctly accounts for video rotation metadata.
-      // Raw file width/height may not reflect rotation (e.g. a portrait video
-      // stored as 1920x1080 with 90° rotation).
-      if (probeAspectRatio > 0) {
+      if ((aspectRatio == null || aspectRatio == 1) && probeAspectRatio > 0) {
         aspectRatio = probeAspectRatio;
       }
       final durationInMilliseconds = value.duration.inMilliseconds;
@@ -847,6 +1130,9 @@ class _SeekBarAndDuration extends StatelessWidget {
   final ValueNotifier<bool> isSeeking;
   final int position;
   final EnteFile file;
+  final ValueNotifier<double?>? scrubPositionNotifier;
+  final VideoFitMode fitMode;
+  final VoidCallback onToggleFitMode;
 
   const _SeekBarAndDuration({
     required this.controller,
@@ -855,6 +1141,9 @@ class _SeekBarAndDuration extends StatelessWidget {
     required this.isSeeking,
     required this.position,
     required this.file,
+    this.scrubPositionNotifier,
+    required this.fitMode,
+    required this.onToggleFitMode,
   });
 
   @override
@@ -937,6 +1226,7 @@ class _SeekBarAndDuration extends StatelessWidget {
                             controller!,
                             durationToSeconds(duration),
                             isSeeking,
+                            scrubPositionNotifier: scrubPositionNotifier,
                           ),
                         ),
                         Text(
@@ -944,6 +1234,12 @@ class _SeekBarAndDuration extends StatelessWidget {
                           style: getEnteTextTheme(context).mini.copyWith(
                                 color: textBaseDark,
                               ),
+                        ),
+                        const SizedBox(width: 4),
+                        VideoFitModeButton(
+                          mode: fitMode,
+                          onPressed: onToggleFitMode,
+                          color: textBaseDark,
                         ),
                       ],
                     ),

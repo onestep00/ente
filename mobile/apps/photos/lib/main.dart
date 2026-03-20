@@ -5,7 +5,7 @@ import "package:adaptive_theme/adaptive_theme.dart";
 import "package:computer/computer.dart";
 import 'package:ente_crypto/ente_crypto.dart';
 import "package:ente_pure_utils/ente_pure_utils.dart";
-import "package:ffmpeg_kit_flutter/ffmpeg_kit_config.dart";
+import "package:ffmpeg_kit_flutter_new/ffmpeg_kit_config.dart";
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -174,6 +174,7 @@ Future<void> _runMinimally(String taskId, TimeLogger tlog) async {
     // Crypto rel.
     await Computer.shared().turnOn(workersCount: 4);
     CryptoUtil.init();
+    FFmpegKitConfig.init().ignore();
 
     // Init Network Utils
     await NetworkClient.instance.init(packageInfo);
@@ -223,6 +224,13 @@ Future<void> _runMinimally(String taskId, TimeLogger tlog) async {
     // await MLService.instance.runAllML(force: true);
     _logger.info("[BG TASK] smart albums sync");
     await smartAlbumsService.syncSmartAlbums();
+
+    _logger.info("[BG TASK] streamable videos processing");
+    await VideoPreviewService.instance.runBackgroundStreaming(
+      maxDuration: Platform.isIOS
+          ? const Duration(seconds: 20)
+          : const Duration(minutes: 10),
+    );
 
     _logger.info("[BG TASK] $taskId completed");
   } catch (e, s) {

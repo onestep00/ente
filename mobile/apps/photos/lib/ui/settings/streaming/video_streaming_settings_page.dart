@@ -12,6 +12,8 @@ import "package:photos/theme/ente_theme.dart";
 import "package:photos/ui/common/loading_widget.dart";
 import "package:photos/ui/common/web_page.dart";
 import "package:photos/ui/components/buttons/button_widget.dart";
+import "package:photos/ui/components/captioned_text_widget.dart";
+import "package:photos/ui/components/menu_item_widget/menu_item_widget.dart";
 import "package:photos/ui/components/menu_item_widget/menu_item_widget_new.dart";
 import "package:photos/ui/components/models/button_type.dart";
 import "package:photos/ui/components/toggle_switch_widget.dart";
@@ -226,6 +228,11 @@ class VideoStreamingStatusWidgetState
     extends State<VideoStreamingStatusWidget> {
   double? _netProcessed;
   StreamSubscription? _subscription;
+  Timer? _progressTimer;
+  int _queueTotal = 0;
+  int _queueCurrent = 0;
+  List<String> _encodingSummary = const [];
+  double? _encodingProgress;
 
   @override
   void initState() {
@@ -234,25 +241,46 @@ class VideoStreamingStatusWidgetState
     _subscription =
         Bus.instance.on<VideoPreviewStateChangedEvent>().listen((event) {
       final status = event.status;
+      _refreshQueueStatus();
 
-      // Handle different states
-      switch (status) {
-        case PreviewItemStatus.uploaded:
-          init();
-          break;
-        default:
+      if (status == PreviewItemStatus.uploaded) {
+        init();
       }
+    });
+    unawaited(_updateEncodingProgress());
+    _progressTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      unawaited(_updateEncodingProgress());
     });
   }
 
   Future<void> init() async {
-    _netProcessed = await VideoPreviewService.instance.getStatus();
-    setState(() {});
+    final netProcessed = await VideoPreviewService.instance.getStatus();
+    if (!mounted) return;
+    setState(() {
+      _netProcessed = netProcessed;
+      _syncQueueStatus();
+    });
+  }
+
+  void _syncQueueStatus() {
+    final queueProgress = VideoPreviewService.instance.getQueueProgress();
+    _queueTotal = queueProgress.total;
+    _queueCurrent = queueProgress.current;
+    _encodingSummary = VideoPreviewService.instance.getCurrentEncodingSummary();
+    if (_encodingSummary.isEmpty) {
+      _encodingProgress = null;
+    }
+  }
+
+  void _refreshQueueStatus() {
+    if (!mounted) return;
+    setState(_syncQueueStatus);
   }
 
   @override
   void dispose() {
     _subscription?.cancel();
+    _progressTimer?.cancel();
     super.dispose();
   }
 
@@ -260,7 +288,8 @@ class VideoStreamingStatusWidgetState
   Widget build(BuildContext context) {
     final textTheme = getEnteTextTheme(context);
     final colorScheme = getEnteColorScheme(context);
-
+    final bool hasQueue = _queueTotal > 0;
+    final bool hasEncodingSummary = _encodingSummary.isNotEmpty;
     return Column(
       children: [
         if (_netProcessed != null)
@@ -277,6 +306,34 @@ class VideoStreamingStatusWidgetState
                 ),
                 key: ValueKey("processed_items_$_netProcessed"),
               ),
+              if (hasQueue) ...[
+                const SizedBox(height: 8),
+                MenuItemWidget(
+                  captionedTextWidget: CaptionedTextWidget(
+                    title: AppLocalizations.of(context).processingVideos,
+                  ),
+                  trailingWidget: Text(
+                    _queueCurrent > 0
+                        ? '$_queueCurrent/$_queueTotal'
+                        : AppLocalizations.of(context).queued,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  singleBorderRadius: 8,
+                  alignCaptionedTextToLeft: true,
+                  isGestureDetectorDisabled: true,
+                  menuItemColor: colorScheme.fillFaint,
+                ),
+              ],
+              if (hasEncodingSummary) ...[
+                const SizedBox(height: 8),
+                MenuItemWidget(
+                  captionedTextWidget: _buildEncodingSummary(context),
+                  singleBorderRadius: 8,
+                  alignCaptionedTextToLeft: true,
+                  isGestureDetectorDisabled: true,
+                  menuItemColor: colorScheme.fillFaint,
+                ),
+              ],
               const SizedBox(height: 12),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -291,5 +348,68 @@ class VideoStreamingStatusWidgetState
           const EnteLoadingWidget(),
       ],
     );
+  }
+
+  Widget _buildEncodingSummary(BuildContext context) {
+    final textTheme = getEnteTextTheme(context);
+    final mutedColor = getEnteColorScheme(context).textMuted;
+    final progressValue = _encodingProgress;
+    final progressLine = progressValue == null
+        ? null
+        : "${AppLocalizations.of(context).processing}: ${(progressValue * 100).toStringAsFixed(0)}%";
+    return Flexible(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 2),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              AppLocalizations.of(context).streamDetails,
+              style: textTheme.body,
+            ),
+            const SizedBox(height: 6),
+            if (progressLine != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text(
+                  progressLine,
+                  style: textTheme.mini.copyWith(color: mutedColor),
+                ),
+              ),
+            ..._encodingSummary.map(
+              (line) => Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text(
+                  line,
+                  style: textTheme.mini.copyWith(color: mutedColor),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _updateEncodingProgress() async {
+    final progress =
+        await VideoPreviewService.instance.getCurrentEncodingProgress();
+    if (!mounted) return;
+
+    final summary = VideoPreviewService.instance.getCurrentEncodingSummary();
+    final clamped =
+        progress == null ? null : progress.clamp(0.0, 1.0) as double;
+    final summaryChanged = summary.join("\n") != _encodingSummary.join("\n");
+    final progressChanged = switch ((clamped, _encodingProgress)) {
+      (null, null) => false,
+      (null, _) => true,
+      (_, null) => true,
+      _ => (clamped! - _encodingProgress!).abs() >= 0.01,
+    };
+    if (!summaryChanged && !progressChanged) return;
+    setState(() {
+      _encodingSummary = summary;
+      _encodingProgress = clamped;
+    });
   }
 }
