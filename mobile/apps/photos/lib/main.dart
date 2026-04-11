@@ -6,7 +6,7 @@ import "package:computer/computer.dart";
 import 'package:ente_crypto/ente_crypto.dart';
 import "package:ente_pure_utils/ente_pure_utils.dart";
 import "package:ente_rust/ente_rust.dart";
-import "package:ffmpeg_kit_flutter/ffmpeg_kit_config.dart";
+import "package:ffmpeg_kit_flutter_new/ffmpeg_kit_config.dart";
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
