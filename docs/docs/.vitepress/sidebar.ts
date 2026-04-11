@@ -3,6 +3,13 @@
 
 export const sidebar = [
     {
+        text: "Custom",
+        items: [
+            { text: "Overview", link: "/custom/" },
+            { text: "Create Stream Branch", link: "/custom/create-stream" },
+        ],
+    },
+    {
         text: "Photos",
         items: [
             { text: "Introduction", link: "/photos/" },
