@@ -80,9 +80,9 @@ export const EmbedFileListWithViewer: React.FC<
                         <span style={{ whiteSpace: "nowrap" }}>powered by</span>
                         <Box
                             component="a"
-                            href="https://ente.io"
+                            href="https://ente.com"
                             target="_blank"
-                            rel="noopener noreferrer"
+                            rel="noopener"
                             sx={{
                                 transition: "color 0.2s ease",
                                 color: "inherit",

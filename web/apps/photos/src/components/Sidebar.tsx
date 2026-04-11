@@ -6,7 +6,6 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import CloseIcon from "@mui/icons-material/Close";
-import HealthAndSafetyIcon from "@mui/icons-material/HealthAndSafety";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
 import NorthEastIcon from "@mui/icons-material/NorthEast";
@@ -73,15 +72,22 @@ import {
 import { DeleteAccount } from "ente-new/photos/components/DeleteAccount";
 import { DropdownInput } from "ente-new/photos/components/DropdownInput";
 import { ShapeIcon } from "ente-new/photos/components/icons/ShapeIcon";
+import { AppLockSettings } from "ente-new/photos/components/sidebar/AppLockSettings";
 import { MLSettings } from "ente-new/photos/components/sidebar/MLSettings";
 import { SessionsSettings } from "ente-new/photos/components/sidebar/SessionsSettings";
 import { TwoFactorSettings } from "ente-new/photos/components/sidebar/TwoFactorSettings";
 import { downloadAppDialogAttributes } from "ente-new/photos/components/utils/download";
 import {
+    useAppLockSnapshot,
     useHLSGenerationStatusSnapshot,
     useSettingsSnapshot,
     useUserDetailsSnapshot,
 } from "ente-new/photos/components/utils/use-snapshot";
+import {
+    reauthenticateWithAppLock,
+    suppressAppLockRefreshFromSessionForTrustedReload,
+    suppressAutoLockOnBlurForTrustedPrompt,
+} from "ente-new/photos/services/app-lock";
 import {
     PseudoCollectionID,
     type CollectionSummaries,
@@ -115,6 +121,7 @@ import {
     pullUserDetails,
     redirectToCustomerPortal,
     userDetailsAddOnBonuses,
+    userDetailsSnapshot,
     type UserDetails,
 } from "ente-new/photos/services/user-details";
 import { usePhotosAppContext } from "ente-new/photos/types/context";
@@ -198,6 +205,7 @@ type SidebarProps = ModalVisibilityProps & {
 
 type AccountAction = Extract<
     SidebarActionID,
+    | "account.subscription"
     | "account.recoveryKey"
     | "account.twoFactor"
     | "account.twoFactor.reconfigure"
@@ -235,6 +243,14 @@ type FreeUpSpaceAction = Extract<
     SidebarActionID,
     "freeUpSpace.deduplicate" | "freeUpSpace.largeFiles"
 >;
+
+const appLockReauthenticationCancelledMessage =
+    "app_lock_reauthentication_cancelled";
+
+const isReauthenticationCancellation = (error: unknown) =>
+    error == undefined ||
+    (error instanceof Error &&
+        error.message === appLockReauthenticationCancelledMessage);
 
 export const Sidebar: React.FC<SidebarProps> = ({
     open,
@@ -290,6 +306,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
         [setWatchFolderView],
     );
 
+    const handleShowExport = useCallback(() => {
+        if (!isDesktop) {
+            showMiniDialog(downloadAppDialogAttributes());
+            return;
+        }
+
+        void (async () => {
+            try {
+                await onAuthenticateUser();
+                onShowExport();
+            } catch {
+                // User cancelled reauthentication.
+            }
+        })();
+    }, [onAuthenticateUser, onShowExport, showMiniDialog]);
+
     const performSidebarAction = useCallback(
         async (actionID: SidebarActionID) =>
             performSidebarRegistryAction(actionID, {
@@ -300,7 +332,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 showPreferences,
                 showHelp,
                 showFreeUpSpace,
-                onShowExport,
+                onShowExport: handleShowExport,
                 onLogout: handleLogout,
                 onShowWatchFolder: handleOpenWatchFolder,
                 pseudoIDs: {
@@ -328,7 +360,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             onClose,
             onShowCollectionSummary,
             onShowPlanSelector,
-            onShowExport,
+            handleShowExport,
             showAccount,
             showFreeUpSpace,
             showHelp,
@@ -376,8 +408,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 <UtilitySection
                     onCloseSidebar={onClose}
                     {...{
-                        onShowExport,
+                        onShowExport: handleShowExport,
                         onAuthenticateUser,
+                        onShowPlanSelector,
                         showAccount,
                         accountVisibilityProps,
                         showPreferences,
@@ -414,6 +447,35 @@ const RootSidebarDrawer = styled(SidebarDrawer)(({ theme }) => ({
 interface SectionProps {
     onCloseSidebar: SidebarProps["onClose"];
 }
+
+const openManageSubscription = ({
+    userDetails,
+    showManageMemberSubscription,
+    onShowPlanSelector,
+}: {
+    userDetails: UserDetails | undefined;
+    showManageMemberSubscription: () => void;
+    onShowPlanSelector: () => void;
+}) => {
+    if (
+        userDetails &&
+        isPartOfFamily(userDetails) &&
+        !isFamilyAdmin(userDetails)
+    ) {
+        showManageMemberSubscription();
+    } else if (
+        userDetails &&
+        isSubscriptionStripe(userDetails.subscription) &&
+        isSubscriptionPastDue(userDetails.subscription)
+    ) {
+        // TODO: This makes an API request, so the UI should indicate the await.
+        //
+        // eslint-disable-next-line @typescript-eslint/no-floating-promises
+        redirectToCustomerPortal();
+    } else {
+        onShowPlanSelector();
+    }
+};
 
 const HeaderSection: React.FC<SectionProps> = ({ onCloseSidebar }) => (
     <SpacedRow sx={{ mt: "6px", pl: "12px" }}>
@@ -456,25 +518,12 @@ const UserDetailsSection: React.FC<UserDetailsSectionProps> = ({
         [userDetails],
     );
 
-    const handleSubscriptionCardClick = () => {
-        if (isNonAdminFamilyMember) {
-            showManageMemberSubscription();
-        } else {
-            if (
-                userDetails &&
-                isSubscriptionStripe(userDetails.subscription) &&
-                isSubscriptionPastDue(userDetails.subscription)
-            ) {
-                // TODO: This makes an API request, so the UI should indicate
-                // the await.
-                //
-                // eslint-disable-next-line @typescript-eslint/no-floating-promises
-                redirectToCustomerPortal();
-            } else {
-                onShowPlanSelector();
-            }
-        }
-    };
+    const handleSubscriptionCardClick = () =>
+        openManageSubscription({
+            userDetails,
+            showManageMemberSubscription,
+            onShowPlanSelector,
+        });
 
     return (
         <>
@@ -558,12 +607,10 @@ const SubscriptionStatus: React.FC<SubscriptionStatusProps> = ({
     const hasAddOnBonus = userDetailsAddOnBonuses(userDetails).length > 0;
 
     let message: React.ReactNode;
-    let showUpgradeText = false;
     if (!hasAddOnBonus) {
         if (isSubscriptionActive(userDetails.subscription)) {
             if (isSubscriptionFree(userDetails.subscription)) {
                 message = t("subscription_info_free");
-                showUpgradeText = true;
             } else if (isSubscriptionCancelled(userDetails.subscription)) {
                 message = t("subscription_info_renewal_cancelled", {
                     date: userDetails.subscription.expiryTime,
@@ -592,39 +639,13 @@ const SubscriptionStatus: React.FC<SubscriptionStatusProps> = ({
 
     return (
         <Box sx={{ px: 1, pt: 0.5 }}>
-            <Stack
-                direction="row"
-                sx={{ alignItems: "center", justifyContent: "space-between" }}
+            <Typography
+                variant="small"
+                onClick={handleClick}
+                sx={{ color: "text.muted" }}
             >
-                <Typography
-                    variant="small"
-                    onClick={handleClick}
-                    sx={{ color: "text.muted" }}
-                >
-                    {message}
-                </Typography>
-                {showUpgradeText && (
-                    <Stack
-                        direction="row"
-                        onClick={onShowPlanSelector}
-                        sx={{
-                            alignItems: "center",
-                            cursor: "pointer",
-                            "&:hover": { opacity: 0.8 },
-                        }}
-                    >
-                        <Typography
-                            variant="small"
-                            sx={{ color: "text.base", fontWeight: "medium" }}
-                        >
-                            {t("upgrade")}
-                        </Typography>
-                        <ChevronRightIcon
-                            sx={{ fontSize: "18px", color: "text.muted" }}
-                        />
-                    </Stack>
-                )}
-            </Stack>
+                {message}
+            </Typography>
         </Box>
     );
 };
@@ -785,7 +806,10 @@ const ShortcutSection: React.FC<ShortcutSectionProps> = ({
 };
 
 type UtilitySectionProps = SectionProps &
-    Pick<SidebarProps, "onShowExport" | "onAuthenticateUser"> & {
+    Pick<
+        SidebarProps,
+        "onShowExport" | "onAuthenticateUser" | "onShowPlanSelector"
+    > & {
         showAccount: () => void;
         accountVisibilityProps: ModalVisibilityProps;
         showPreferences: () => void;
@@ -811,6 +835,7 @@ const UtilitySection: React.FC<UtilitySectionProps> = ({
     onCloseSidebar,
     onShowExport,
     onAuthenticateUser,
+    onShowPlanSelector,
     showAccount,
     accountVisibilityProps,
     showPreferences,
@@ -831,13 +856,6 @@ const UtilitySection: React.FC<UtilitySectionProps> = ({
     pendingFreeUpSpaceAction,
     onFreeUpSpaceActionHandled,
 }) => {
-    const { showMiniDialog } = useBaseContext();
-
-    const handleExport = () =>
-        isDesktop
-            ? onShowExport()
-            : showMiniDialog(downloadAppDialogAttributes());
-
     return (
         <>
             <RowButton
@@ -875,7 +893,7 @@ const UtilitySection: React.FC<UtilitySectionProps> = ({
                         <RowButtonEndActivityIndicator />
                     )
                 }
-                onClick={handleExport}
+                onClick={onShowExport}
             />
             <Help
                 {...helpVisibilityProps}
@@ -894,7 +912,7 @@ const UtilitySection: React.FC<UtilitySectionProps> = ({
                 onRootClose={onCloseSidebar}
                 pendingAction={pendingAccountAction}
                 onActionHandled={onAccountActionHandled}
-                {...{ onAuthenticateUser }}
+                {...{ onAuthenticateUser, onShowPlanSelector }}
             />
             <Preferences
                 {...preferencesVisibilityProps}
@@ -951,7 +969,7 @@ const InfoSection: React.FC = () => {
 };
 
 type AccountProps = NestedSidebarDrawerVisibilityProps &
-    Pick<SidebarProps, "onAuthenticateUser"> & {
+    Pick<SidebarProps, "onAuthenticateUser" | "onShowPlanSelector"> & {
         pendingAction?: AccountAction;
         onActionHandled?: (action?: AccountAction) => void;
     };
@@ -961,13 +979,19 @@ const Account: React.FC<AccountProps> = ({
     onClose,
     onRootClose,
     onAuthenticateUser,
+    onShowPlanSelector,
     pendingAction,
     onActionHandled,
 }) => {
     const { showMiniDialog } = useBaseContext();
+    const userDetails = useUserDetailsSnapshot();
 
     const router = useRouter();
 
+    const {
+        show: showManageMemberSubscription,
+        props: manageMemberSubscriptionVisibilityProps,
+    } = useModalVisibility();
     const { show: showRecoveryKey, props: recoveryKeyVisibilityProps } =
         useModalVisibility();
     const { show: showTwoFactor, props: twoFactorVisibilityProps } =
@@ -976,6 +1000,14 @@ const Account: React.FC<AccountProps> = ({
         useModalVisibility();
     const { show: showDeleteAccount, props: deleteAccountVisibilityProps } =
         useModalVisibility();
+
+    const isNonAdminFamilyMember = useMemo(
+        () =>
+            userDetails &&
+            isPartOfFamily(userDetails) &&
+            !isFamilyAdmin(userDetails),
+        [userDetails],
+    );
 
     const handleRootClose = () => {
         onClose();
@@ -989,21 +1021,61 @@ const Account: React.FC<AccountProps> = ({
         void router.push("/change-email");
     }, [router]);
 
+    const handleManageSubscription = useCallback(() => {
+        void (async () => {
+            if (!userDetails) {
+                await pullUserDetails();
+            }
+
+            const resolvedUserDetails = userDetails ?? userDetailsSnapshot();
+            if (!resolvedUserDetails) return;
+
+            openManageSubscription({
+                userDetails: resolvedUserDetails,
+                showManageMemberSubscription,
+                onShowPlanSelector,
+            });
+        })();
+    }, [onShowPlanSelector, showManageMemberSubscription, userDetails]);
+
+    const handleRecoveryKey = useCallback(async () => {
+        if (isDesktop) {
+            const reauthResult = await reauthenticateWithAppLock();
+            if (reauthResult === "cancelled") return;
+            if (reauthResult === "fallback") await onAuthenticateUser();
+        } else {
+            await onAuthenticateUser();
+        }
+        showRecoveryKey();
+    }, [onAuthenticateUser, showRecoveryKey]);
+
     const handlePasskeys = useCallback(async () => {
         onRootClose();
+        if (isDesktop) {
+            suppressAutoLockOnBlurForTrustedPrompt();
+        }
         await openAccountsManagePasskeysPage();
     }, [onRootClose]);
 
     const handleActiveSessions = useCallback(async () => {
-        await onAuthenticateUser();
+        if (isDesktop) {
+            const reauthResult = await reauthenticateWithAppLock();
+            if (reauthResult === "cancelled") return;
+            if (reauthResult === "fallback") await onAuthenticateUser();
+        } else {
+            await onAuthenticateUser();
+        }
         showSessions();
     }, [onAuthenticateUser, showSessions]);
 
     useEffect(() => {
         if (!open || !pendingAction) return;
         switch (pendingAction) {
+            case "account.subscription":
+                handleManageSubscription();
+                break;
             case "account.recoveryKey":
-                showRecoveryKey();
+                void handleRecoveryKey();
                 break;
             case "account.twoFactor.reconfigure":
             case "account.twoFactor":
@@ -1027,15 +1099,16 @@ const Account: React.FC<AccountProps> = ({
         }
         onActionHandled?.();
     }, [
+        handleManageSubscription,
         handleActiveSessions,
         handleChangeEmail,
         handleChangePassword,
+        handleRecoveryKey,
         handlePasskeys,
         open,
         onActionHandled,
         pendingAction,
         showDeleteAccount,
-        showRecoveryKey,
         showTwoFactor,
     ]);
 
@@ -1048,13 +1121,14 @@ const Account: React.FC<AccountProps> = ({
             <Stack sx={{ px: 2, py: 1, gap: 3 }}>
                 <RowButtonGroup>
                     <RowButton
-                        endIcon={
-                            <HealthAndSafetyIcon
-                                sx={{ color: "accent.main" }}
-                            />
-                        }
+                        label={t("manage_plan")}
+                        onClick={handleManageSubscription}
+                    />
+                </RowButtonGroup>
+                <RowButtonGroup>
+                    <RowButton
                         label={t("recovery_key")}
-                        onClick={showRecoveryKey}
+                        onClick={() => void handleRecoveryKey()}
                     />
                 </RowButtonGroup>
                 <RowButtonGroup>
@@ -1070,6 +1144,12 @@ const Account: React.FC<AccountProps> = ({
                         onClick={handleActiveSessions}
                     />
                 </RowButtonGroup>
+                {isDesktop && (
+                    <DesktopAppLockSettings
+                        onAuthenticateUser={onAuthenticateUser}
+                        onRootClose={onRootClose}
+                    />
+                )}
                 <RowButtonGroup>
                     <RowButton
                         label={t("change_password")}
@@ -1093,6 +1173,12 @@ const Account: React.FC<AccountProps> = ({
                 {...recoveryKeyVisibilityProps}
                 {...{ showMiniDialog }}
             />
+            {isNonAdminFamilyMember && userDetails && (
+                <ManageMemberSubscription
+                    {...manageMemberSubscriptionVisibilityProps}
+                    {...{ userDetails }}
+                />
+            )}
             <TwoFactorSettings
                 {...twoFactorVisibilityProps}
                 onRootClose={onRootClose}
@@ -1106,6 +1192,43 @@ const Account: React.FC<AccountProps> = ({
                 {...{ onAuthenticateUser }}
             />
         </TitledNestedSidebarDrawer>
+    );
+};
+
+const DesktopAppLockSettings: React.FC<
+    Pick<SidebarProps, "onAuthenticateUser"> & Pick<AccountProps, "onRootClose">
+> = ({ onAuthenticateUser, onRootClose }) => {
+    const appLock = useAppLockSnapshot();
+    const { show, props } = useModalVisibility();
+
+    const handleOpen = useCallback(async () => {
+        try {
+            await onAuthenticateUser();
+            show();
+        } catch (error) {
+            if (isReauthenticationCancellation(error)) return;
+            log.error("Failed to open app lock settings", error);
+        }
+    }, [onAuthenticateUser, show]);
+
+    return (
+        <>
+            <RowButtonGroup>
+                <RowButton
+                    label={t("app_lock")}
+                    caption={
+                        !appLock.supported
+                            ? t("app_lock_not_supported", {
+                                  defaultValue: "App lock is not supported",
+                              })
+                            : undefined
+                    }
+                    disabled={!appLock.supported}
+                    onClick={handleOpen}
+                />
+            </RowButtonGroup>
+            <AppLockSettings {...props} onRootClose={onRootClose} />
+        </>
     );
 };
 
@@ -1245,6 +1368,8 @@ const LanguageSelector = () => {
     const locale = getLocaleInUse();
 
     const updateCurrentLocale = (newLocale: SupportedLocale) => {
+        if (newLocale === locale) return;
+
         void setLocaleInUse(newLocale).then(() => {
             // [Note: Changing locale causes a full reload]
             //
@@ -1254,6 +1379,12 @@ const LanguageSelector = () => {
             // We also rely on this behaviour by caching various formatters in
             // module static variables that not get updated if the i18n.language
             // changes unless there is a full reload.
+            //
+            // Mark this as a trusted app-initiated reload so desktop app-lock
+            // setup does not force an immediate lock screen.
+            if (globalThis.electron) {
+                suppressAppLockRefreshFromSessionForTrustedReload();
+            }
             window.location.reload();
         });
     };
@@ -1453,7 +1584,7 @@ const DomainSettingsContents: React.FC = () => {
                         components={{
                             a: (
                                 <Link
-                                    href="https://ente.io/help/photos/features/sharing-and-collaboration/custom-domains/"
+                                    href="https://ente.com/help/photos/features/sharing-and-collaboration/custom-domains/"
                                     target="_blank"
                                     rel="noopener"
                                     color="accent"
@@ -1637,11 +1768,11 @@ const Help: React.FC<HelpProps> = ({
     };
 
     const handleHelp = useCallback(
-        () => openURL("https://ente.io/help/photos/"),
+        () => openURL("https://ente.com/help/photos/"),
         [],
     );
 
-    const handleBlog = useCallback(() => openURL("https://ente.io/blog/"), []);
+    const handleBlog = useCallback(() => openURL("https://ente.com/blog/"), []);
 
     const handleRequestFeature = useCallback(
         () => openURL("https://github.com/ente-io/ente/discussions"),
@@ -1649,7 +1780,7 @@ const Help: React.FC<HelpProps> = ({
     );
 
     const handleSupport = useCallback(
-        () => initiateEmail("support@ente.io"),
+        () => initiateEmail("support@ente.com"),
         [],
     );
 
@@ -1740,7 +1871,7 @@ const Help: React.FC<HelpProps> = ({
                     <RowButton
                         endIcon={<ChevronRightIcon />}
                         label={
-                            <Tooltip title="support@ente.io">
+                            <Tooltip title="support@ente.com">
                                 <Typography sx={{ fontWeight: "medium" }}>
                                     {t("support")}
                                 </Typography>

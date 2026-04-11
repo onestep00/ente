@@ -328,7 +328,7 @@ class _MachineLearningSettingsPageState
         builder: (BuildContext context) {
           return WebPage(
             AppLocalizations.of(context).privacyPolicyTitle,
-            "https://ente.io/privacy",
+            "https://ente.com/privacy",
           );
         },
       ),
@@ -358,6 +358,7 @@ class _MachineLearningSettingsPageState
             value: () => localSettings.isMLLocalIndexingEnabled,
             onChanged: () async {
               final localIndexing = await localSettings.toggleLocalMLIndexing();
+              Bus.instance.fire(NotificationEvent());
               if (localIndexing) {
                 unawaited(MLService.instance.runAllML(force: true));
               } else {
@@ -441,7 +442,7 @@ class _ModelLoadingStateState extends State<ModelLoadingState> {
         MenuSectionTitle(title: AppLocalizations.of(context).status),
         const SizedBox(height: 8),
         FutureBuilder(
-          future: canUseHighBandwidth(),
+          future: canUseHighBandwidth().then((v) => isOfflineMode || v),
           builder: (context, snapshot) {
             String title = "";
             if (snapshot.hasData) {

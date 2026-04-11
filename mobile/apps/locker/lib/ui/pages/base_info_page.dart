@@ -1,10 +1,12 @@
 import 'dart:io';
 
 import 'package:ente_events/event_bus.dart';
+import 'package:ente_ui/components/alert_bottom_sheet.dart';
 import "package:ente_ui/components/title_bar_title_widget.dart";
 import 'package:ente_ui/theme/ente_theme.dart';
 import 'package:ente_ui/utils/dialog_util.dart';
 import 'package:ente_ui/utils/toast_util.dart';
+import "package:ente_utils/email_util.dart";
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:locker/core/errors.dart';
@@ -16,6 +18,7 @@ import 'package:locker/services/collections/models/collection.dart';
 import 'package:locker/services/favorites_service.dart';
 import 'package:locker/services/files/sync/models/file.dart';
 import 'package:locker/services/info_file_service.dart';
+import 'package:locker/services/trash/models/trash_file.dart';
 import 'package:locker/ui/components/collection_selection_widget.dart';
 import "package:locker/ui/components/gradient_button.dart";
 import 'package:locker/ui/pages/home_page.dart';
@@ -95,6 +98,8 @@ abstract class BaseInfoPageState<T extends InfoData, W extends BaseInfoPage<T>>
 
   @protected
   bool get isSaveEnabled => !_isLoading && _selectedCollectionIds.isNotEmpty;
+
+  bool get _canEditExistingFile => widget.existingFile is! TrashFile;
 
   @protected
   Future<bool> onEditModeBackPressed() async {
@@ -280,6 +285,13 @@ abstract class BaseInfoPageState<T extends InfoData, W extends BaseInfoPage<T>>
         showToast(
           context,
           context.l10n.uploadStorageLimitErrorBody,
+        );
+      }
+    } on NoActiveSubscriptionError {
+      if (mounted) {
+        await _showUploadErrorSheet(
+          context.l10n.uploadSubscriptionExpiredErrorTitle,
+          context.l10n.uploadSubscriptionExpiredErrorBody,
         );
       }
     } on FileLimitReachedError {
@@ -491,6 +503,28 @@ abstract class BaseInfoPageState<T extends InfoData, W extends BaseInfoPage<T>>
     });
   }
 
+  Future<void> _showUploadErrorSheet(String title, String message) async {
+    await showAlertBottomSheet(
+      context,
+      title: title,
+      message: message,
+      assetPath: "assets/warning-grey.png",
+      isDismissible: true,
+      buttons: [
+        GradientButton(
+          text: context.l10n.contactSupport,
+          onTap: () async {
+            await sendEmail(
+              context,
+              to: "support@ente.com",
+              body: message,
+            );
+          },
+        ),
+      ],
+    );
+  }
+
   void _toggleMode() {
     setState(() {
       _currentMode = _currentMode == InfoPageMode.view
@@ -641,7 +675,7 @@ abstract class BaseInfoPageState<T extends InfoData, W extends BaseInfoPage<T>>
                 ),
           automaticallyImplyLeading: false,
           actions: [
-            if (isViewMode && currentData != null)
+            if (isViewMode && currentData != null && _canEditExistingFile)
               IconButton(
                 icon: const Icon(Icons.edit),
                 onPressed: _toggleMode,

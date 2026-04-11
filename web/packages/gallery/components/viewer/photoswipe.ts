@@ -121,7 +121,7 @@ export interface FileViewerPhotoSwipeDelegate {
 
 type FileViewerPhotoSwipeOptions = Pick<
     FileViewerProps,
-    "initialIndex" | "showFullscreenButton"
+    "initialIndex" | "showFullscreenButton" | "disableEscapeClose"
 > & {
     /**
      * `true` if we're running in the context of a logged in user, and so
@@ -140,14 +140,11 @@ type FileViewerPhotoSwipeOptions = Pick<
      * `true` if the like and comment action buttons should be shown.
      *
      * These buttons are shown only when viewing files in a shared album
-     * (incoming or outgoing) or in a public album.
+     * (incoming or outgoing).
      */
     showSocialButtons: boolean;
     /**
-     * `true` if comments are enabled on the public link.
-     *
-     * When `false`, the comment button will be hidden even if
-     * {@link showSocialButtons} is `true`.
+     * `true` if the comments and reactions controls should be enabled.
      */
     enableComment: boolean;
     /**
@@ -250,6 +247,7 @@ export class FileViewerPhotoSwipe {
         showSocialButtons,
         enableComment,
         showFullscreenButton,
+        disableEscapeClose,
         delegate,
         onClose,
         onAnnotate,
@@ -283,6 +281,9 @@ export class FileViewerPhotoSwipe {
             // auto hide based on mouse activity, but that would not have any
             // effect on touch devices)
             bgClickAction: "toggle-controls",
+            // In single-file public viewer mode we keep Escape for nested UI
+            // interactions while preventing accidental viewer closure.
+            escKey: !disableEscapeClose,
             // At least on macOS, manual zooming with the trackpad is very
             // cumbersome (possibly because of the small multiplier in the
             // PhotoSwipe source, but I'm not sure). The other option to do a
@@ -762,10 +763,11 @@ export class FileViewerPhotoSwipe {
         let shouldIgnoreNextVideoQualityChange = false;
 
         /**
-         * If a {@link mediaControllerID} is present in the given
-         * {@link itemData}, then make the media controls visible and link the
-         * media-control-bars (and other containers that house controls) to the
-         * given controller. Otherwise hide the media controls.
+         * Update the media controls for the given {@link itemData}.
+         *
+         * - Show controls only for videos.
+         * - Keep controls visible but disabled while video playback is loading.
+         * - Link controls to the media controller once available.
          */
         const updateVideoControlsAndPlayback = (itemData: ItemData) => {
             // For reasons possibly related to the 1 tick wait in the hls-video
@@ -848,6 +850,20 @@ export class FileViewerPhotoSwipe {
 
         const _updateVideoControlsAndPlayback = (itemData: ItemData) => {
             const container = mediaControlsContainerElement;
+            const showVideoControls =
+                itemData.fileType == FileType.video && !itemData.fetchFailed;
+            const areVideoControlsDisabled =
+                showVideoControls &&
+                (!!itemData.isContentLoading || !itemData.mediaControllerID);
+            container?.classList.toggle(
+                "pswp__media-controls--visible",
+                showVideoControls,
+            );
+            container?.classList.toggle(
+                "pswp__media-controls--disabled",
+                areVideoControlsDisabled,
+            );
+
             const controls =
                 container?.querySelectorAll(
                     "media-control-bar, media-playback-rate-menu",
@@ -1525,17 +1541,13 @@ export class FileViewerPhotoSwipe {
                         // initialization before the first slide is shown.
                         if (!_currentAnnotatedFile) return;
                         // Show buttons if: static showSocialButtons is true
-                        // (public album) OR delegate says this file should
-                        // show buttons (file in shared collection).
-                        // For public albums (no logged-in user), also check
-                        // if comments are enabled on the public link.
+                        // OR delegate says this file should show buttons
+                        // (file in shared collection).
                         const af = currentAnnotatedFile();
                         const baseShow =
                             showSocialButtons ||
                             delegate.shouldShowSocialButtons(af);
-                        // For public albums (!haveUser), also require enableComment
-                        const shouldShow =
-                            baseShow && (haveUser || enableComment);
+                        const shouldShow = baseShow && enableComment;
                         actionButtonsEl.style.display = shouldShow
                             ? "flex"
                             : "none";

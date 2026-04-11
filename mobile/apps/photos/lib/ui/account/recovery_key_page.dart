@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:bip39/bip39.dart' as bip39;
@@ -95,11 +96,12 @@ class _RecoveryKeyPageState extends State<RecoveryKeyPage> {
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Column(
               children: [
+                const SizedBox(height: 16),
                 Center(
                   child: Image.asset(
                     'assets/recovery_key.png',
-                    width: 101,
-                    height: 82,
+                    width: 100,
+                    height: 100,
                   ),
                 ),
                 const SizedBox(height: 24),
@@ -111,7 +113,7 @@ class _RecoveryKeyPageState extends State<RecoveryKeyPage> {
                     color: colorScheme.textBase,
                   ),
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 20),
                 Text(
                   widget.subText ??
                       AppLocalizations.of(context).recoveryKeySaveDescription,
@@ -120,7 +122,7 @@ class _RecoveryKeyPageState extends State<RecoveryKeyPage> {
                     color: colorScheme.textMuted,
                   ),
                 ),
-                const SizedBox(height: 16),
+                const SizedBox(height: 20),
                 Container(
                   decoration: BoxDecoration(
                     color: colorScheme.greenBase,
@@ -166,9 +168,10 @@ class _RecoveryKeyPageState extends State<RecoveryKeyPage> {
                       ButtonWidgetV2(
                         buttonType: ButtonTypeV2.secondary,
                         shouldStickToLightTheme: true,
+                        shouldSurfaceExecutionStates: false,
                         labelText: AppLocalizations.of(context).shareKey,
                         onTap: () async {
-                          await _shareRecoveryKey(recoveryKey);
+                          unawaited(_shareRecoveryKey(recoveryKey));
                         },
                       ),
                     ],

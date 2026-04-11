@@ -1074,6 +1074,54 @@ abstract class AppLocalizations {
   /// **'Terms'**
   String get termsOfServicesTitle;
 
+  /// No description provided for @checkForUpdates.
+  ///
+  /// In en, this message translates to:
+  /// **'Check for updates'**
+  String get checkForUpdates;
+
+  /// No description provided for @checkingForUpdates.
+  ///
+  /// In en, this message translates to:
+  /// **'Checking for updates...'**
+  String get checkingForUpdates;
+
+  /// No description provided for @unableToCheckForUpdatesRightNow.
+  ///
+  /// In en, this message translates to:
+  /// **'Unable to check for updates right now'**
+  String get unableToCheckForUpdatesRightNow;
+
+  /// No description provided for @youAreOnTheLatestVersion.
+  ///
+  /// In en, this message translates to:
+  /// **'You are on the latest version'**
+  String get youAreOnTheLatestVersion;
+
+  /// No description provided for @aNewVersionOfEnteLockerIsAvailable.
+  ///
+  /// In en, this message translates to:
+  /// **'A new version of Ente Locker is available.'**
+  String get aNewVersionOfEnteLockerIsAvailable;
+
+  /// No description provided for @criticalUpdateAvailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Critical update available'**
+  String get criticalUpdateAvailable;
+
+  /// No description provided for @updateAvailable.
+  ///
+  /// In en, this message translates to:
+  /// **'Update available'**
+  String get updateAvailable;
+
+  /// No description provided for @downloadUpdate.
+  ///
+  /// In en, this message translates to:
+  /// **'Download update'**
+  String get downloadUpdate;
+
   /// No description provided for @support.
   ///
   /// In en, this message translates to:
@@ -1899,7 +1947,7 @@ abstract class AppLocalizations {
   /// No description provided for @shareTextRecommendUsingEnte.
   ///
   /// In en, this message translates to:
-  /// **'Download Ente\n\nhttps://ente.io'**
+  /// **'Download Ente\n\nhttps://ente.com'**
   String get shareTextRecommendUsingEnte;
 
   /// No description provided for @thisIsYourVerificationId.
@@ -1947,13 +1995,13 @@ abstract class AppLocalizations {
   /// No description provided for @shareMyVerificationID.
   ///
   /// In en, this message translates to:
-  /// **'Here\'s my verification ID: {verificationID} for ente.io.'**
+  /// **'Here\'s my verification ID: {verificationID} for ente.com.'**
   String shareMyVerificationID(Object verificationID);
 
   /// No description provided for @shareTextConfirmOthersVerificationID.
   ///
   /// In en, this message translates to:
-  /// **'Hey, can you confirm that this is your ente.io verification ID: {verificationID}'**
+  /// **'Hey, can you confirm that this is your ente.com verification ID: {verificationID}'**
   String shareTextConfirmOthersVerificationID(Object verificationID);
 
   /// No description provided for @passwordLock.
@@ -2129,6 +2177,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'You\'ve run out of storage space. Free up space to continue uploading.'**
   String get uploadStorageLimitErrorBody;
+
+  /// Title shown when uploads fail because the Photos subscription is expired
+  ///
+  /// In en, this message translates to:
+  /// **'Subscription expired'**
+  String get uploadSubscriptionExpiredErrorTitle;
+
+  /// Body shown when uploads fail because the Photos subscription is expired
+  ///
+  /// In en, this message translates to:
+  /// **'Your Ente Photos subscription has expired. Renew your subscription to continue uploading.'**
+  String get uploadSubscriptionExpiredErrorBody;
 
   /// Title shown when uploads fail because the locker already has the maximum file count
   ///
@@ -3023,6 +3083,24 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Please authenticate to view your active sessions'**
   String get authToViewYourActiveSessions;
+
+  /// No description provided for @deleteAccountFeedbackPrompt.
+  ///
+  /// In en, this message translates to:
+  /// **'Something not working? Reach out at {email}, we\'d love to help.'**
+  String deleteAccountFeedbackPrompt(String email);
+
+  /// No description provided for @sendFeedback.
+  ///
+  /// In en, this message translates to:
+  /// **'Send feedback'**
+  String get sendFeedback;
+
+  /// No description provided for @deleteAccountPermanentWarning.
+  ///
+  /// In en, this message translates to:
+  /// **'This will permanently delete your Ente Auth, Photos, and Locker data'**
+  String get deleteAccountPermanentWarning;
 }
 
 class _AppLocalizationsDelegate

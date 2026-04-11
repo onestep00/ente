@@ -43,14 +43,17 @@ import "package:photos/service_locator.dart";
 import "package:photos/services/account/user_service.dart";
 import "package:photos/services/album_home_widget_service.dart";
 import "package:photos/services/app_lifecycle_service.dart";
+import "package:photos/services/app_navigation_service.dart";
 import "package:photos/services/collections_service.dart";
 import "package:photos/services/machine_learning/face_ml/person/person_service.dart";
+import "package:photos/services/machine_learning/semantic_search/semantic_search_service.dart";
 import "package:photos/services/memory_home_widget_service.dart";
 import "package:photos/services/notification_service.dart";
 import "package:photos/services/people_home_widget_service.dart";
 import "package:photos/services/sync/diff_fetcher.dart";
 import "package:photos/services/sync/local_sync_service.dart";
 import "package:photos/services/sync/remote_sync_service.dart";
+import "package:photos/services/update_service.dart";
 import "package:photos/states/user_details_state.dart";
 import "package:photos/theme/colors.dart";
 import "package:photos/theme/ente_theme.dart";
@@ -122,6 +125,7 @@ class _HomeWidgetState extends State<HomeWidget> {
   bool _showShowBackupHook = false;
   bool _personSyncTriggered = false;
   bool _collectionsSyncTriggered = false;
+  bool _isShowingChangeLog = false;
   final isOnSearchTabNotifier = ValueNotifier<bool>(false);
   final ValueNotifier<bool> _swipeToSelectInProgressNotifier =
       ValueNotifier<bool>(false);
@@ -151,6 +155,10 @@ class _HomeWidgetState extends State<HomeWidget> {
     _logger.info("Building initstate");
     super.initState();
 
+    NotificationService.instance
+        .initialize(_onDidReceiveNotificationResponse)
+        .ignore();
+
     if (LocalSyncService.instance.hasCompletedFirstImportOrBypassed()) {
       syncWidget();
     }
@@ -161,6 +169,7 @@ class _HomeWidgetState extends State<HomeWidget> {
 
       if (event.selectedIndex == 3) {
         isOnSearchTabNotifier.value = true;
+        unawaited(SemanticSearchService.instance.prepareForInteractiveSearch());
       } else {
         isOnSearchTabNotifier.value = false;
       }
@@ -215,6 +224,9 @@ class _HomeWidgetState extends State<HomeWidget> {
         Bus.instance.on<AppModeChangedEvent>().listen((event) async {
       if (mounted) {
         setState(() {});
+        _scheduleChangeLogCheck(
+          delay: const Duration(milliseconds: 250),
+        );
       }
     });
     _firstImportEvent =
@@ -233,6 +245,13 @@ class _HomeWidgetState extends State<HomeWidget> {
             if (mounted) {
               setState(() {});
               syncWidget();
+              if (!NotificationService.instance.hasGrantedPermissions() &&
+                  isOfflineMode &&
+                  !Configuration.instance.hasConfiguredAccount()) {
+                Future.delayed(const Duration(seconds: 2), () {
+                  NotificationService.instance.requestPermissions().ignore();
+                });
+              }
             }
           },
         );
@@ -280,18 +299,9 @@ class _HomeWidgetState extends State<HomeWidget> {
 
     // For sharing images coming from outside the app
     _initMediaShareSubscription();
-    WidgetsBinding.instance.addPostFrameCallback(
-      (_) => Future.delayed(
-        const Duration(seconds: 1),
-        () => {
-          if (mounted) {showChangeLog(context)},
-        },
-      ),
+    _scheduleChangeLogCheck(
+      delay: const Duration(seconds: 1),
     );
-
-    NotificationService.instance
-        .initialize(_onDidReceiveNotificationResponse)
-        .ignore();
 
     if (Platform.isAndroid &&
         !localSettings.hasConfiguredInAppLinkPermissions() &&
@@ -333,6 +343,18 @@ class _HomeWidgetState extends State<HomeWidget> {
     await MemoryHomeWidgetService.instance.checkPendingMemorySync();
   }
 
+  void _scheduleChangeLogCheck({
+    required Duration delay,
+  }) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      Future.delayed(delay, () {
+        if (mounted) {
+          showChangeLog(context);
+        }
+      });
+    });
+  }
+
   final Map<Uri, (bool, int)> _linkedPublicAlbums = {};
   Future<void> _handlePublicAlbumLink(Uri uri, String via) async {
     if (!mounted) {
@@ -355,8 +377,11 @@ class _HomeWidgetState extends State<HomeWidget> {
       }
       _linkedPublicAlbums[uri] = (isInitialStream, currentTime);
 
-      final Collection collection = await CollectionsService.instance
+      final Collection? collection = await CollectionsService.instance
           .getCollectionFromPublicLink(context, uri);
+      if (collection == null) {
+        return;
+      }
 
       final existingCollection =
           CollectionsService.instance.getCollectionByID(collection.id);
@@ -712,6 +737,10 @@ class _HomeWidgetState extends State<HomeWidget> {
     bool isSettingsOpen = false;
     final enableDrawer = _shouldEnableDrawer();
     final action = AppLifecycleService.instance.mediaExtensionAction.action;
+    final isOnOnlineGrantPermissionScreen =
+        Configuration.instance.hasConfiguredAccount() &&
+            !isOfflineMode &&
+            _shouldShowPermissionWidget();
     return UserDetailsStateWidget(
       child: PopScope(
         canPop: false,
@@ -810,41 +839,44 @@ class _HomeWidgetState extends State<HomeWidget> {
 
           ///To fix the status bar not adapting it's color when switching
           ///screens the have different appbar colours.
-          appBar: PreferredSize(
-            preferredSize: const Size.fromHeight(0),
-            child: ValueListenableBuilder<bool>(
-              valueListenable: isOnSearchTabNotifier,
-              builder: (context, isOnSearchTab, _) {
-                return AnimatedBuilder(
-                  animation: IndexOfStackNotifier(),
-                  builder: (context, _) {
-                    final colorScheme = getEnteColorScheme(context);
-                    final resultsBackground = EnteTheme.isDark(context)
-                        ? const Color.fromRGBO(22, 22, 22, 1)
-                        : colorScheme.backgroundElevated2;
-                    final isSearchResults =
-                        isOnSearchTab && IndexOfStackNotifier().index == 1;
-                    final isOnLandingPage =
-                        !Configuration.instance.hasConfiguredAccount() &&
-                            !isOfflineMode;
-                    final isOnOnlineGrantPermissionScreen =
-                        Configuration.instance.hasConfiguredAccount() &&
-                            !isOfflineMode &&
-                            _shouldShowPermissionWidget();
-                    return AppBar(
-                      backgroundColor: isOnLandingPage
-                          ? colorScheme.greenBase
-                          : isSearchResults
-                              ? resultsBackground
-                              : isOnOnlineGrantPermissionScreen
-                                  ? colorScheme.backgroundColour
-                                  : colorScheme.backgroundBase,
-                    );
-                  },
-                );
-              },
-            ),
-          ),
+          appBar: isOnOnlineGrantPermissionScreen
+              ? null
+              : PreferredSize(
+                  preferredSize: const Size.fromHeight(0),
+                  child: ValueListenableBuilder<bool>(
+                    valueListenable: isOnSearchTabNotifier,
+                    builder: (context, isOnSearchTab, _) {
+                      return AnimatedBuilder(
+                        animation: IndexOfStackNotifier(),
+                        builder: (context, _) {
+                          final colorScheme = getEnteColorScheme(context);
+                          final resultsBackground = EnteTheme.isDark(context)
+                              ? const Color.fromRGBO(22, 22, 22, 1)
+                              : colorScheme.backgroundElevated2;
+                          final isSearchResults = isOnSearchTab &&
+                              IndexOfStackNotifier().index == 1;
+                          final isOnLandingPage =
+                              !Configuration.instance.hasConfiguredAccount() &&
+                                  !isOfflineMode &&
+                                  !widget.startWithoutAccount;
+                          final isOnOnlineGrantPermissionScreen =
+                              Configuration.instance.hasConfiguredAccount() &&
+                                  !isOfflineMode &&
+                                  _shouldShowPermissionWidget();
+                          return AppBar(
+                            backgroundColor: isOnLandingPage
+                                ? colorScheme.greenBase
+                                : isSearchResults
+                                    ? resultsBackground
+                                    : isOnOnlineGrantPermissionScreen
+                                        ? colorScheme.backgroundColour
+                                        : colorScheme.backgroundBase,
+                          );
+                        },
+                      );
+                    },
+                  ),
+                ),
           resizeToAvoidBottomInset: false,
         ),
       ),
@@ -855,16 +887,21 @@ class _HomeWidgetState extends State<HomeWidget> {
     final bool offlineMode = isOfflineMode;
     if (!Configuration.instance.hasConfiguredAccount()) {
       _closeDrawerIfOpen(context);
-      final isOfflineEntryFlowEnabled =
-          widget.startWithoutAccount && offlineMode;
+      final shouldBootstrapOfflineEntryFlow =
+          widget.startWithoutAccount && !offlineMode;
       final hasPersistedOfflineMode = localSettings.isAppModeSet && offlineMode;
       final canResumePersistedOfflineMode =
           hasPersistedOfflineMode && permissionService.hasGrantedPermissions();
-      if (isOfflineEntryFlowEnabled || canResumePersistedOfflineMode) {
-        if (_shouldShowPermissionWidget()) {
-          return const GrantPermissionsWidget(startWithoutAccount: true);
-        }
-      } else {
+      final shouldUseOfflineEntryFlow =
+          widget.startWithoutAccount || canResumePersistedOfflineMode;
+
+      if (shouldBootstrapOfflineEntryFlow) {
+        return const GrantPermissionsWidget(startWithoutAccount: true);
+      }
+      if (shouldUseOfflineEntryFlow && _shouldShowPermissionWidget()) {
+        return const GrantPermissionsWidget(startWithoutAccount: true);
+      }
+      if (!shouldUseOfflineEntryFlow) {
         return const LandingPageWidget();
       }
     }
@@ -1048,33 +1085,50 @@ class _HomeWidgetState extends State<HomeWidget> {
   }
 
   showChangeLog(BuildContext context) async {
-    final bool show = await updateService.showChangeLog();
-    if (!show || !Configuration.instance.isLoggedIn()) {
+    if (_isShowingChangeLog) {
       return;
     }
-    final colorScheme = getEnteColorScheme(context);
-    await showBarModalBottomSheet(
-      topControl: const SizedBox.shrink(),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.only(
-          topLeft: Radius.circular(5),
-          topRight: Radius.circular(5),
+    _isShowingChangeLog = true;
+    try {
+      final action = await updateService.getChangeLogAction(
+        locale: Localizations.localeOf(context),
+        isOffline: isOfflineMode,
+        isSignedIn: Configuration.instance.isLoggedIn(),
+      );
+      if (!mounted || action == ChangeLogAction.skip) {
+        return;
+      }
+      if (action == ChangeLogAction.consumeWithoutShowing) {
+        updateService.hideChangeLog().ignore();
+        return;
+      }
+      final colorScheme = getEnteColorScheme(context);
+      await showBarModalBottomSheet(
+        topControl: const SizedBox.shrink(),
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.only(
+            topLeft: Radius.circular(5),
+            topRight: Radius.circular(5),
+          ),
         ),
-      ),
-      backgroundColor: colorScheme.backgroundElevated,
-      enableDrag: false,
-      barrierColor: backdropFaintDark,
-      context: context,
-      builder: (BuildContext context) {
-        return Padding(
-          padding:
-              EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
-          child: const ChangeLogPage(),
-        );
-      },
-    );
-    // Do not show change dialog again
-    updateService.hideChangeLog().ignore();
+        backgroundColor: colorScheme.backgroundElevated,
+        enableDrag: false,
+        barrierColor: backdropFaintDark,
+        context: context,
+        builder: (BuildContext context) {
+          return Padding(
+            padding: EdgeInsets.only(
+              bottom: MediaQuery.of(context).viewInsets.bottom,
+            ),
+            child: const ChangeLogPage(),
+          );
+        },
+      );
+      // Do not show change dialog again
+      await updateService.hideChangeLog();
+    } finally {
+      _isShowingChangeLog = false;
+    }
   }
 
   void _onDidReceiveNotificationResponse(
@@ -1105,15 +1159,13 @@ class _HomeWidgetState extends State<HomeWidget> {
           // Ensure the camera is stacked on top of the ritual page so the user
           // lands on the ritual details after adding photos via a notification.
           // ignore: unawaited_futures
-          routeToPage(
-            context,
+          AppNavigationService.instance.pushPage(
             RitualPage(ritualId: ritualId),
           );
         }
         if (!canOpenRitual) return;
         // ignore: unawaited_futures
-        routeToPage(
-          context,
+        AppNavigationService.instance.pushPage(
           RitualCameraPage(
             ritualId: ritualId,
             albumId: albumId,
@@ -1127,8 +1179,7 @@ class _HomeWidgetState extends State<HomeWidget> {
         }
         final target = FeedNavigationTarget.fromUri(uri);
         // ignore: unawaited_futures
-        routeToPage(
-          context,
+        AppNavigationService.instance.pushPage(
           FeedScreen(
             initialTarget: target,
           ),
@@ -1136,16 +1187,13 @@ class _HomeWidgetState extends State<HomeWidget> {
         return;
       }
       if (payload.toLowerCase().contains("onthisday")) {
-        _logger.info("On this day notification received");
         // ignore: unawaited_futures
-        memoriesCacheService.goToOnThisDayMemory(context);
+        memoriesCacheService.goToOnThisDayMemory();
       } else if (payload.toLowerCase().contains("birthday")) {
-        _logger.info("Birthday notification received");
         final personID = payload.substring("birthday_".length);
         // ignore: unawaited_futures
-        memoriesCacheService.goToPersonMemory(context, personID);
+        memoriesCacheService.goToPersonMemory(personID);
       } else {
-        _logger.info("Album notification received");
         final collectionID = Uri.parse(payload).queryParameters["collectionID"];
         if (collectionID != null) {
           final collection = CollectionsService.instance
@@ -1153,8 +1201,7 @@ class _HomeWidgetState extends State<HomeWidget> {
           final thumbnail =
               await CollectionsService.instance.getCover(collection);
           // ignore: unawaited_futures
-          routeToPage(
-            context,
+          AppNavigationService.instance.pushPage(
             CollectionPage(
               CollectionWithThumbnail(
                 collection,

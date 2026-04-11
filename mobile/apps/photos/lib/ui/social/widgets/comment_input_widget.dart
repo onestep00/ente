@@ -138,6 +138,7 @@ class _CommentInputWidgetState extends State<CommentInputWidget>
                 controller: widget.controller,
                 focusNode: widget.focusNode,
                 keyboardType: TextInputType.multiline,
+                textCapitalization: TextCapitalization.sentences,
                 textInputAction: TextInputAction.newline,
                 inputFormatters: [LengthLimitingTextInputFormatter(500)],
                 minLines: 1,

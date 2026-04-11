@@ -1,6 +1,5 @@
 import "package:flutter/material.dart";
 import "package:hugeicons/hugeicons.dart";
-import "package:photos/extensions/user_extension.dart";
 import "package:photos/generated/l10n.dart";
 import "package:photos/models/api/collection/user.dart";
 import "package:photos/models/social/feed_item.dart";
@@ -9,6 +8,7 @@ import "package:photos/theme/colors.dart";
 import "package:photos/theme/ente_theme.dart";
 import "package:photos/theme/text_style.dart";
 import "package:photos/ui/sharing/user_avator_widget.dart";
+import "package:photos/ui/social/widgets/resolved_social_user_name.dart";
 
 class FeedPreviewItemWidget extends StatelessWidget {
   final FeedItem feedItem;
@@ -246,26 +246,27 @@ class _PreviewTextContent extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final primaryUser = _getPrimaryUser();
-    final primaryName = primaryUser.displayName ?? primaryUser.email;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        // Username row with "and X other(s)"
-        _buildUsernameRow(context, primaryName),
-        const SizedBox(height: 2),
-        // Action description
-        Text(
-          _getActionDescription(context),
-          style: textTheme.small.copyWith(
-            color: colorScheme.textMuted,
-            fontWeight: FontWeight.w500,
+    return ResolvedSocialUserName(
+      user: primaryUser,
+      builder: (context, primaryName) => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _buildUsernameRow(context, primaryName),
+          const SizedBox(height: 2),
+          Text.rich(
+            _getActionDescriptionSpan(
+              context,
+              textTheme.small.copyWith(
+                color: colorScheme.textMuted,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
           ),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-        ),
-      ],
+        ],
+      ),
     );
   }
 
@@ -311,29 +312,87 @@ class _PreviewTextContent extends StatelessWidget {
     );
   }
 
-  String _getActionDescription(BuildContext context) {
+  InlineSpan _getActionDescriptionSpan(
+    BuildContext context,
+    TextStyle baseStyle,
+  ) {
     final l10n = AppLocalizations.of(context);
     final isOwn = feedItem.isOwnedByCurrentUser;
     switch (feedItem.type) {
       case FeedItemType.photoLike:
-        return isOwn ? l10n.likedYourPhoto : l10n.likedAPhoto;
+        return TextSpan(
+          text: isOwn ? l10n.likedYourPhoto : l10n.likedAPhoto,
+          style: baseStyle,
+        );
       case FeedItemType.comment:
-        return isOwn ? l10n.commentedOnYourPhoto : l10n.commentedOnAPhoto;
+        return TextSpan(
+          text: isOwn ? l10n.commentedOnYourPhoto : l10n.commentedOnAPhoto,
+          style: baseStyle,
+        );
       case FeedItemType.reply:
-        return isOwn ? l10n.repliedToYourComment : l10n.repliedToAComment;
+        return TextSpan(
+          text: isOwn ? l10n.repliedToYourComment : l10n.repliedToAComment,
+          style: baseStyle,
+        );
       case FeedItemType.commentLike:
-        return isOwn ? l10n.likedYourComment : l10n.likedAComment;
+        return TextSpan(
+          text: isOwn ? l10n.likedYourComment : l10n.likedAComment,
+          style: baseStyle,
+        );
       case FeedItemType.replyLike:
-        return isOwn ? l10n.likedYourReply : l10n.likedAReply;
+        return TextSpan(
+          text: isOwn ? l10n.likedYourReply : l10n.likedAReply,
+          style: baseStyle,
+        );
       case FeedItemType.sharedPhoto:
         final count = feedItem.sharedFileCount;
         final albumName = feedItem.collectionName ?? l10n.albums;
-        if (count == 1) {
-          return l10n.addedAMemoryTo(albumName: albumName);
-        } else {
-          return l10n.addedNMemoriesTo(count: count, albumName: albumName);
-        }
+        final fullText = count == 1
+            ? l10n.addedAMemoryTo(albumName: albumName)
+            : l10n.addedNMemoriesTo(count: count, albumName: albumName);
+        return _buildAlbumNameHighlightedSpan(
+          fullText: fullText,
+          albumName: albumName,
+          baseStyle: baseStyle,
+        );
+      case FeedItemType.sharedCollection:
+        final albumName = feedItem.collectionName ?? l10n.albums;
+        return _buildAlbumNameHighlightedSpan(
+          fullText: l10n.sharedAlbumWithYou(albumName: albumName),
+          albumName: albumName,
+          baseStyle: baseStyle,
+        );
     }
+  }
+
+  InlineSpan _buildAlbumNameHighlightedSpan({
+    required String fullText,
+    required String albumName,
+    required TextStyle baseStyle,
+  }) {
+    if (albumName.isEmpty) {
+      return TextSpan(text: fullText, style: baseStyle);
+    }
+
+    final startIndex = fullText.indexOf(albumName);
+    if (startIndex < 0) {
+      return TextSpan(text: fullText, style: baseStyle);
+    }
+
+    final beforeText = fullText.substring(0, startIndex);
+    final afterText = fullText.substring(startIndex + albumName.length);
+
+    return TextSpan(
+      style: baseStyle,
+      children: [
+        if (beforeText.isNotEmpty) TextSpan(text: beforeText),
+        TextSpan(
+          text: albumName,
+          style: baseStyle.copyWith(fontWeight: FontWeight.w700),
+        ),
+        if (afterText.isNotEmpty) TextSpan(text: afterText),
+      ],
+    );
   }
 
   User _getPrimaryUser() {

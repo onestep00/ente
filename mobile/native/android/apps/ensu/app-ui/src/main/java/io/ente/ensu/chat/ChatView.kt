@@ -11,29 +11,33 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.unit.dp
-import app.rive.runtime.kotlin.core.Alignment as RiveAlignment
-import io.ente.ensu.components.ensuRiveAnimation
 import io.ente.ensu.designsystem.EnsuColor
 import io.ente.ensu.designsystem.EnsuSpacing
 import io.ente.ensu.domain.model.Attachment
@@ -59,9 +63,11 @@ fun ChatView(
     onOpenAttachment: (Attachment) -> Unit,
     onStartDownload: (Boolean) -> Unit,
     onOverflowTrim: () -> Unit,
-    onOverflowIncreaseContext: () -> Unit,
     onOverflowCancel: () -> Unit
 ) {
+    val density = LocalDensity.current
+    var inputBarHeightDp by remember { mutableStateOf(0.dp) }
+
     val showDownloadOnboarding by remember(
         chatState.isModelDownloaded,
         chatState.messages,
@@ -78,8 +84,6 @@ fun ChatView(
     var didAutoFocusInput by remember { mutableStateOf(false) }
     var focusRequestId by remember { mutableStateOf(0) }
     var wasDrawerOpen by remember { mutableStateOf(false) }
-    var inputBarHeightPx by remember { mutableIntStateOf(0) }
-    var showFloatingStreamingIndicator by remember { mutableStateOf(chatState.isGenerating) }
 
     val shouldAutoFocusInput = chatState.isModelDownloaded &&
         !showDownloadOnboarding &&
@@ -114,33 +118,6 @@ fun ChatView(
         }
     }
 
-    val shouldAutoDownload by remember(
-        chatState.hasRequestedModelDownload,
-        chatState.isDownloading,
-        chatState.isGenerating
-    ) {
-        derivedStateOf {
-            chatState.hasRequestedModelDownload &&
-                !chatState.isDownloading &&
-                !chatState.isGenerating
-        }
-    }
-
-    LaunchedEffect(chatState.isModelDownloaded, shouldAutoDownload) {
-        if (!chatState.isModelDownloaded && shouldAutoDownload) {
-            onStartDownload(false)
-        }
-    }
-
-    LaunchedEffect(chatState.isGenerating) {
-        if (chatState.isGenerating) {
-            showFloatingStreamingIndicator = true
-        } else if (showFloatingStreamingIndicator) {
-            delay(520)
-            showFloatingStreamingIndicator = false
-        }
-    }
-
     val sessionKey = chatState.currentSessionId ?: "new-session"
 
     val editingMessage by remember(chatState.editingMessageId, chatState.messages) {
@@ -150,9 +127,6 @@ fun ChatView(
             }
         }
     }
-
-    val density = LocalDensity.current
-    val floatingIndicatorBottomPadding = with(density) { inputBarHeightPx.toDp() }
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -176,37 +150,38 @@ fun ChatView(
                     enter.togetherWith(exit)
                 },
                 label = "session-change"
-            ) {
-                MessageList(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(
-                            start = EnsuSpacing.pageHorizontal.dp,
-                            end = EnsuSpacing.pageHorizontal.dp
-                        ),
-                    messages = chatState.messages,
-                    streamingResponse = chatState.streamingResponse,
-                    streamingParentId = chatState.streamingParentId,
-                    isGenerating = chatState.isGenerating,
-                    isModelDownloaded = chatState.isModelDownloaded,
-                    isDownloading = chatState.isDownloading,
-                    downloadPercent = chatState.downloadPercent,
-                    downloadStatus = chatState.downloadStatus,
-                    modelDownloadSizeBytes = chatState.modelDownloadSizeBytes,
-                    branchSelections = chatState.branchSelections,
-                    onEditMessage = onEditMessage,
-                    onRetryMessage = onRetryMessage,
-                    onBranchChange = onBranchChange,
-                    onOpenAttachment = onOpenAttachment,
-                    onStartDownload = onStartDownload
-                )
+            ) { targetSessionKey ->
+                key(targetSessionKey) {
+                    MessageList(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(
+                                start = EnsuSpacing.pageHorizontal.dp,
+                                end = EnsuSpacing.pageHorizontal.dp
+                            ),
+                        messages = chatState.messages,
+                        streamingResponse = chatState.streamingResponse,
+                        streamingParentId = chatState.streamingParentId,
+                        isGenerating = chatState.isGenerating,
+                        isModelDownloaded = chatState.isModelDownloaded,
+                        isDownloading = chatState.isDownloading,
+                        downloadPercent = chatState.downloadPercent,
+                        downloadStatus = chatState.downloadStatus,
+                        modelDownloadSizeBytes = chatState.modelDownloadSizeBytes,
+                        branchSelections = chatState.branchSelections,
+                        onEditMessage = onEditMessage,
+                        onRetryMessage = onRetryMessage,
+                        onBranchChange = onBranchChange,
+                        onOpenAttachment = onOpenAttachment,
+                        onStartDownload = onStartDownload
+                    )
+                }
             }
 
             chatState.overflowDialog?.let { overflow ->
                 OverflowDialog(
                     state = overflow,
                     onTrim = onOverflowTrim,
-                    onIncreaseContext = onOverflowIncreaseContext,
                     onCancel = onOverflowCancel
                 )
             }
@@ -217,7 +192,9 @@ fun ChatView(
                         .fillMaxWidth()
                         .navigationBarsPadding()
                         .background(EnsuColor.backgroundBase())
-                        .onSizeChanged { inputBarHeightPx = it.height },
+                        .onGloballyPositioned { coords ->
+                            inputBarHeightDp = with(density) { coords.size.height.toDp() }
+                        },
                     messageText = chatState.messageText,
                     attachments = chatState.attachments,
                     editingMessage = editingMessage,
@@ -241,27 +218,28 @@ fun ChatView(
             }
         }
 
-        if (!showDownloadOnboarding && showFloatingStreamingIndicator) {
-            Box(
+        val imeVisible = WindowInsets.ime.getBottom(density) > 0
+        if (imeVisible && inputBarHeightDp > 0.dp) {
+            IconButton(
+                onClick = { focusManager.clearFocus() },
                 modifier = Modifier
-                    .align(androidx.compose.ui.Alignment.BottomCenter)
-                    .padding(bottom = floatingIndicatorBottomPadding)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .width(115.dp)
-                        .height(52.5.dp)
-                ) {
-                    ensuRiveAnimation(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .offset(y = (-4).dp),
-                        alignment = RiveAlignment.CENTER,
-                        outroTrigger = !chatState.isGenerating,
-                        outroInputName = "outro",
-                        clipContent = false
+                    .align(Alignment.BottomEnd)
+                    .imePadding()
+                    .padding(
+                        end = EnsuSpacing.pageHorizontal.dp,
+                        bottom = inputBarHeightDp + EnsuSpacing.sm.dp
                     )
-                }
+                    .background(
+                        color = EnsuColor.fillFaint(),
+                        shape = CircleShape
+                    )
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.KeyboardArrowDown,
+                    contentDescription = "Dismiss keyboard",
+                    modifier = Modifier.padding(7.dp),
+                    tint = EnsuColor.textPrimary()
+                )
             }
         }
 
@@ -279,6 +257,7 @@ fun ChatView(
             DownloadToastOverlay(
                 status = status ?: "",
                 percent = chatState.downloadPercent ?: 0,
+                totalBytes = chatState.modelDownloadSizeBytes,
                 isLoading = isLoading,
                 onCancel = onCancelDownload
             )

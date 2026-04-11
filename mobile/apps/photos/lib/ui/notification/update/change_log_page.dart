@@ -49,7 +49,7 @@ class _ChangeLogPageState extends State<ChangeLogPage> {
           const SizedBox(
             height: 24,
           ),
-          Flexible(child: _getChangeLog(context)),
+          Flexible(child: _getChangeLog()),
           const DividerWidget(
             dividerType: DividerType.solid,
           ),
@@ -70,8 +70,7 @@ class _ChangeLogPageState extends State<ChangeLogPage> {
                     labelText: AppLocalizations.of(context).continueLabel,
                     icon: Icons.arrow_forward_outlined,
                     onTap: () async {
-                      await updateService.hideChangeLog();
-                      if (mounted && Navigator.of(context).canPop()) {
+                      if (Navigator.of(context).canPop()) {
                         Navigator.of(context).pop();
                       }
                     },
@@ -97,17 +96,22 @@ class _ChangeLogPageState extends State<ChangeLogPage> {
     );
   }
 
-  Widget _getChangeLog(BuildContext ctx) {
-    final strings = ChangeLogStrings.forLocale(Localizations.localeOf(context));
-    final List<ChangeLogEntry> items = [];
-    items.addAll([
+  Widget _getChangeLog() {
+    final strings = ChangeLogStrings.maybeForLocale(
+      Localizations.localeOf(context),
+      isOffline: isOfflineMode,
+    );
+    if (strings == null) {
+      return const SizedBox.shrink();
+    }
+    final items = <ChangeLogEntry>[
       ChangeLogEntry(
         strings.title1,
         description: strings.desc1,
         items: [
           strings.desc1Item1,
           strings.desc1Item2,
-        ],
+        ].where((item) => item.trim().isNotEmpty).toList(growable: false),
         isFeature: true,
       ),
       ChangeLogEntry(
@@ -120,14 +124,26 @@ class _ChangeLogPageState extends State<ChangeLogPage> {
         description: strings.desc3,
         isFeature: true,
       ),
-    ]);
+      ChangeLogEntry(
+        strings.title4,
+        description: strings.desc4,
+        isFeature: true,
+      ),
+    ]
+        .where(
+          (entry) =>
+              entry.title.trim().isNotEmpty ||
+              (entry.description?.trim().isNotEmpty ?? false) ||
+              entry.items.isNotEmpty,
+        )
+        .toList(growable: false);
     return Container(
       padding: const EdgeInsets.only(left: 16),
       child: Scrollbar(
         controller: _scrollController,
         thumbVisibility: true,
         thickness: 2.0,
-        child: ListView.builder(
+        child: ListView.separated(
           controller: _scrollController,
           shrinkWrap: true,
           physics: const BouncingScrollPhysics(),
@@ -137,6 +153,7 @@ class _ChangeLogPageState extends State<ChangeLogPage> {
               child: ChangeLogEntryWidget(entry: items[index]),
             );
           },
+          separatorBuilder: (_, __) => const SizedBox(height: 16),
           itemCount: items.length,
         ),
       ),

@@ -4,6 +4,7 @@ import 'dart:io';
 import "package:app_links/app_links.dart";
 import "package:ente_accounts/services/user_service.dart";
 import 'package:ente_events/event_bus.dart';
+import "package:ente_events/models/trigger_logout_event.dart";
 import "package:ente_ui/components/alert_bottom_sheet.dart";
 import 'package:ente_ui/theme/ente_theme.dart';
 import 'package:ente_ui/utils/dialog_util.dart';
@@ -13,7 +14,6 @@ import "package:flutter_svg/flutter_svg.dart";
 import "package:hugeicons/hugeicons.dart";
 import 'package:listen_sharing_intent/listen_sharing_intent.dart';
 import 'package:locker/events/collections_updated_event.dart';
-import 'package:locker/events/trigger_logout_event.dart';
 import 'package:locker/l10n/l10n.dart';
 import 'package:locker/models/selected_files.dart';
 import 'package:locker/services/collections/collections_service.dart';
@@ -458,7 +458,7 @@ class _HomePageState extends UploaderPageState<HomePage>
               onTap: () async {
                 await sendLogs(
                   context,
-                  "support@ente.io",
+                  "support@ente.com",
                   postShare: () {},
                 );
               },
@@ -522,7 +522,7 @@ class _HomePageState extends UploaderPageState<HomePage>
           CollectionService.instance.hasCompletedFirstSync();
       if (collections.isEmpty && hasCompletedFirstSync) {
         _logger.info("No collections found after sync, setting up defaults");
-        await CollectionService.instance.setupDefaultCollections();
+        await CollectionService.instance.ensureDefaultCollections();
         // Reload collections after setup
         collections = await CollectionService.instance.getCollections();
         await _loadRecentFiles(collections);
@@ -690,6 +690,7 @@ class _HomePageState extends UploaderPageState<HomePage>
                             return const SizedBox.shrink();
                           }
                           return FloatingActionButton(
+                            tooltip: 'Add item',
                             onPressed: _openSavePage,
                             shape: const CircleBorder(),
                             backgroundColor: colorScheme.primary700,

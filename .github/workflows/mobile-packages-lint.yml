@@ -1,17 +1,21 @@
 name: "Lint (mobile packages)"
 
 on:
-    # Run when mobile/packages changes
+    # Run when mobile/packages or shared photos Rust changes
     pull_request:
         paths:
             - "mobile/packages/**"
+            - "mobile/apps/*/pubspec.yaml"
+            - "rust/photos/**"
             - ".github/workflows/mobile-packages-lint.yml"
+            - ".github/scripts/check_mobile_pubspec_constraints.py"
             - "mobile/analysis_options.yaml"
     # Allow manual trigger for testing
     workflow_dispatch:
 
 env:
     FLUTTER_VERSION: "3.32.8"
+    RUST_VERSION: "1.90.0"
     RUSTFLAGS: -D warnings
 
 permissions:
@@ -43,6 +47,7 @@ jobs:
                         - 'mobile/packages/rust/**/Cargo.lock'
                         - 'mobile/apps/photos/rust/**/*.rs'
                         - 'mobile/apps/photos/rust/**/Cargo.toml'
+                        - 'rust/photos/**'
                         - 'rust/core/**/*.rs'
                       workflow:
                         - '.github/workflows/mobile-packages-lint.yml'
@@ -85,16 +90,39 @@ jobs:
                   echo "Lint all: $LINT_ALL"
                   echo "Rust changed: ${{ steps.changes.outputs.rust }}"
 
+    pubspec-constraints:
+        runs-on: ubuntu-latest
+        if: github.event_name == 'pull_request'
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Check changed mobile pubspec constraints
+              run: |
+                  FILES=$(git diff --name-only \
+                    "${{ github.event.pull_request.base.sha }}" \
+                    "${{ github.event.pull_request.head.sha }}" \
+                    -- 'mobile/apps/*/pubspec.yaml' 'mobile/packages/*/pubspec.yaml')
+
+                  if [ -z "$FILES" ]; then
+                    echo "No mobile pubspec changes to validate."
+                    exit 0
+                  fi
+
+                  python3 .github/scripts/check_mobile_pubspec_constraints.py \
+                    "${{ github.event.pull_request.base.sha }}" \
+                    $FILES
+
     packages-lint:
         needs: detect-changes
         runs-on: ubuntu-latest
         # Skip if no packages need linting
         if: needs.detect-changes.outputs.lint_all == 'true' || needs.detect-changes.outputs.packages != ''
         steps:
-            - name: Checkout code and submodules
+            - name: Checkout code
               uses: actions/checkout@v4
-              with:
-                  submodules: recursive
 
             - name: Install Flutter ${{ env.FLUTTER_VERSION  }}
               uses: subosito/flutter-action@v2
@@ -102,6 +130,12 @@ jobs:
                   channel: "stable"
                   flutter-version: ${{ env.FLUTTER_VERSION  }}
                   cache: true
+
+            - name: Install Rust ${{ env.RUST_VERSION }}
+              uses: dtolnay/rust-toolchain@stable
+              with:
+                  toolchain: ${{ env.RUST_VERSION }}
+                  components: rustfmt,clippy
 
             - name: Cache Rust dependencies
               uses: actions/cache@v4
@@ -229,10 +263,21 @@ jobs:
         runs-on: ubuntu-latest
         if: needs.detect-changes.outputs.rust_changed == 'true'
         steps:
-            - name: Checkout code and submodules
+            - name: Checkout code
               uses: actions/checkout@v4
+
+            - name: Install Flutter ${{ env.FLUTTER_VERSION  }}
+              uses: subosito/flutter-action@v2
               with:
-                  submodules: recursive
+                  channel: "stable"
+                  flutter-version: ${{ env.FLUTTER_VERSION  }}
+                  cache: true
+
+            - name: Install Rust ${{ env.RUST_VERSION }}
+              uses: dtolnay/rust-toolchain@stable
+              with:
+                  toolchain: ${{ env.RUST_VERSION }}
+                  components: rustfmt,clippy
 
             - name: Cache Rust dependencies
               uses: actions/cache@v4
@@ -292,9 +337,14 @@ jobs:
         if: needs.detect-changes.outputs.lint_photos == 'true' || needs.detect-changes.outputs.lint_auth == 'true' || needs.detect-changes.outputs.lint_locker == 'true'
         steps:
             - name: Checkout code and submodules
+              if: needs.detect-changes.outputs.lint_auth == 'true'
               uses: actions/checkout@v4
               with:
                   submodules: recursive
+
+            - name: Checkout code
+              if: needs.detect-changes.outputs.lint_auth != 'true'
+              uses: actions/checkout@v4
 
             - name: Install Flutter ${{ env.FLUTTER_VERSION  }}
               uses: subosito/flutter-action@v2
@@ -302,6 +352,13 @@ jobs:
                   channel: "stable"
                   flutter-version: ${{ env.FLUTTER_VERSION  }}
                   cache: true
+
+            - name: Install Rust ${{ env.RUST_VERSION }}
+              if: needs.detect-changes.outputs.lint_photos == 'true' || needs.detect-changes.outputs.lint_locker == 'true'
+              uses: dtolnay/rust-toolchain@stable
+              with:
+                  toolchain: ${{ env.RUST_VERSION }}
+                  components: rustfmt,clippy
 
             - name: Cache Rust dependencies
               uses: actions/cache@v4
@@ -313,11 +370,11 @@ jobs:
                   key: ${{ runner.os }}-cargo-packages-${{ hashFiles('mobile/packages/**/Cargo.lock') }}
 
             - name: Install Flutter Rust Bridge
-              if: needs.detect-changes.outputs.lint_photos == 'true'
+              if: needs.detect-changes.outputs.lint_photos == 'true' || needs.detect-changes.outputs.lint_locker == 'true'
               run: cargo install flutter_rust_bridge_codegen
 
             - name: Generate Rust bindings (Core package)
-              if: needs.detect-changes.outputs.lint_photos == 'true'
+              if: needs.detect-changes.outputs.lint_photos == 'true' || needs.detect-changes.outputs.lint_locker == 'true'
               run: flutter_rust_bridge_codegen generate
               working-directory: mobile/packages/rust
 

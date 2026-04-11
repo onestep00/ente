@@ -18,3 +18,36 @@ declare module "@tauri-apps/api/fs" {
     export function removeFile(path: string): Promise<void>;
     export function renameFile(oldPath: string, newPath: string): Promise<void>;
 }
+
+declare module "@tauri-apps/api/dialog" {
+    export function open(
+        options?: Record<string, unknown>,
+    ): Promise<string | string[] | null>;
+    export function save(
+        options?: Record<string, unknown>,
+    ): Promise<string | null>;
+}
+
+declare module "@tauri-apps/api/process" {
+    export function relaunch(): Promise<void>;
+}
+
+declare module "@tauri-apps/api/shell" {
+    export function open(path: string): Promise<void>;
+}
+
+declare module "@tauri-apps/api/updater" {
+    export interface UpdateManifest {
+        version: string;
+        date: string;
+        body: string;
+    }
+
+    export interface UpdateResult {
+        manifest?: UpdateManifest;
+        shouldUpdate: boolean;
+    }
+
+    export function checkUpdate(): Promise<UpdateResult>;
+    export function installUpdate(): Promise<void>;
+}

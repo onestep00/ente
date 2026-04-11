@@ -57,6 +57,8 @@ class FlagService {
 
   bool get internalOrBetaUser => internalUser || betaUser;
 
+  bool get enableContact => internalUser;
+
   bool get enableStripe => Platform.isIOS ? false : flags.enableStripe;
 
   bool get mapEnabled => flags.mapEnabled;
@@ -73,7 +75,9 @@ class FlagService {
 
   bool get enableVectorDb => hasGrantedMLConsent;
 
-  bool get usearchForSearch => internalUser;
+  bool get usearchForSearch => true;
+
+  bool get usearchForSuggestions => true;
 
   String get castUrl => flags.castUrl;
 
@@ -86,7 +90,7 @@ class FlagService {
   bool get enableOnlyBackupFuturePhotos =>
       internalUser || _isServerFlagEnabled(_backupOptionsFlag);
 
-  bool get facesTimeline => internalUser;
+  bool get facesTimeline => true;
   bool get ritualsFlag => true;
 
   bool get stopStreamProcess => true;
@@ -99,6 +103,24 @@ class FlagService {
 
   bool get isSocialEnabled =>
       internalUser || _isServerFlagEnabled(_commentsFlag);
+
+  bool get enableMemoryShareLink => true;
+
+  bool get useRustForML => internalUser;
+
+  bool get enableMLInBackground => internalUser;
+
+  bool get useRustForFaceThumbnails => internalUser;
+
+  bool get petEnabled => internalUser;
+
+  bool get qrFeatureEnabled => true;
+
+  bool get ocrOverlayEnabled => true;
+
+  bool get enableBgLocalUploadPriority => internalUser;
+
+  bool get syncRecoveryDiagnostics => internalUser;
 
   Future<void> tryRefreshFlags() async {
     try {

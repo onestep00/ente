@@ -106,8 +106,26 @@ const AttachmentCard = memo(({ attachment, onClick }: AttachmentCardProps) => {
     );
 });
 
+const AiSafetyFooter = memo(() => {
+    return (
+        <Typography
+            variant="small"
+            sx={{
+                color: "text.muted",
+                textAlign: "center",
+                width: "100%",
+                fontSize: "12px",
+                lineHeight: "16px",
+            }}
+        >
+            Ensu can make mistakes. Please double-check key details.
+        </Typography>
+    );
+});
+
 interface MessageRowProps {
     message: ChatMessage;
+    isLastMessage: boolean;
     branchSwitchers: Record<string, BranchSwitcher>;
     loadingPhrase: string | null;
     loadingDots: number;
@@ -137,6 +155,7 @@ interface MessageRowProps {
 const MessageRow = memo(
     ({
         message,
+        isLastMessage,
         branchSwitchers,
         loadingPhrase,
         loadingDots,
@@ -161,13 +180,14 @@ const MessageRow = memo(
     }: MessageRowProps) => {
         const isSelf = message.sender === "self";
         const isStreaming = message.messageUuid === STREAMING_SELECTION_KEY;
+        const isSynthetic = !!message.isSynthetic;
         const switcher = branchSwitchers[message.messageUuid];
-        const showSwitcher = !!switcher && switcher.total > 1;
+        const showSwitcher = !isSynthetic && !!switcher && switcher.total > 1;
         const timestamp = formatTime(message.createdAt);
-        const attachments = message.attachments ?? [];
         const assistantMessagePaddingX = "8px";
 
         const { displayText, copyText, imageAttachments } = useMemo(() => {
+            const attachments = message.attachments ?? [];
             const imageAttachments = attachments.filter(
                 (attachment) => attachment.kind === "image",
             );
@@ -178,15 +198,15 @@ const MessageRow = memo(
             const fallbackText = imageCount ? "Attached images" : "";
             const displayText = isSelf
                 ? parsedDocuments.text || fallbackText
-                : message.text || fallbackText;
+                : stripHiddenParts(message.text) || fallbackText;
             const copyText = isSelf
                 ? displayText
                 : stripHiddenParts(message.text);
 
             return { displayText, copyText, imageAttachments };
         }, [
-            attachments,
             isSelf,
+            message.attachments,
             message.text,
             parseDocumentBlocks,
             stripHiddenParts,
@@ -318,7 +338,20 @@ const MessageRow = memo(
                             alignSelf: isSelf ? "flex-end" : "flex-start",
                         }}
                     >
-                        {isStreaming ? null : isSelf ? (
+                        {isStreaming ? null : isSynthetic ? (
+                            isLastMessage ? (
+                                <IconButton
+                                    aria-label="Retry"
+                                    sx={actionButtonSx}
+                                    onClick={() => onRetryMessage(message)}
+                                >
+                                    <HugeiconsIcon
+                                        icon={RepeatIcon}
+                                        {...actionIconProps}
+                                    />
+                                </IconButton>
+                            ) : null
+                        ) : isSelf ? (
                             <>
                                 <IconButton
                                     aria-label="Edit"
@@ -367,7 +400,7 @@ const MessageRow = memo(
                         )}
                     </Stack>
 
-                    {isStreaming ? null : (
+                    {isStreaming || isSynthetic ? null : (
                         <Stack
                             direction="row"
                             sx={{
@@ -573,6 +606,8 @@ export const ChatMessageList = memo(
             );
         }, []);
 
+        const lastMessageUuid = messages[messages.length - 1]?.messageUuid;
+
         const renderMessage = useCallback(
             (_index: number, message: ChatMessage) => {
                 const isStreaming =
@@ -580,6 +615,7 @@ export const ChatMessageList = memo(
                 return (
                     <MessageRow
                         message={message}
+                        isLastMessage={message.messageUuid === lastMessageUuid}
                         branchSwitchers={branchSwitchers}
                         loadingPhrase={isStreaming ? loadingPhrase : null}
                         loadingDots={isStreaming ? loadingDots : 0}
@@ -626,6 +662,7 @@ export const ChatMessageList = memo(
                 stripHiddenParts,
                 userBubbleBackground,
                 userMessageTextSx,
+                lastMessageUuid,
             ],
         );
 
@@ -696,6 +733,7 @@ export const ChatMessageList = memo(
                                 {renderMessage(index, message)}
                             </React.Fragment>
                         ))}
+                        <AiSafetyFooter />
                     </Stack>
                 )}
             </Box>

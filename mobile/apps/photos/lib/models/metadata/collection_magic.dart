@@ -93,7 +93,7 @@ class CollectionPubMagicMetadata {
   // cover photo id for the collection
   int? coverID;
 
-  // layout for public link sharing (grouped, continuous, trip)
+  // layout for public link sharing (masonry, grouped, continuous, trip)
   String? layout;
 
   CollectionPubMagicMetadata({this.asc, this.sortBy, this.coverID, this.layout});
@@ -124,7 +124,7 @@ class CollectionPubMagicMetadata {
       asc: map["asc"] as bool?,
       sortBy: _toCollectionSortBy(map[collectionSortByKey]),
       coverID: map["coverID"],
-      layout: map["layout"] as String? ?? "grouped",
+      layout: map["layout"] as String? ?? "masonry",
     );
   }
 

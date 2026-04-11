@@ -1,15 +1,22 @@
+Latest changes:
+- Neeraj: Fix Added by visibility in file details
+- Neeraj: Contacts
+- Neeraj: Fix grey screen when collections search result is empty 
+- Ashil: Fix app going blank on iOS on deleting all empty albums
+- Ashil: Show family dashboard for family non-admin members too
+- Ashil: Updated 'ente' branding
+- Ashil, Laurens: Fix file download not working for files with stale localID references
+- Ashil: Bug fixes and improvements on Gallery
+
+
+Still behind internal flag:
+- Amrithesh: (I) ML/Pet recognition [Indexing]
+- Amrithesh: (I) QR code detection
+- Laurens: (I) Clip text encoding in rust
+- Laurens: (I) Generate and compress face thumbnails in rust
+- Laurens: (I) Use rust indexing ML pipeline for internal users
 - Laurens: (I) Use cloudflare worker for upload for internal users
-- Ashil: Fix widnow controls hiding app UI on iPadOS
 - Neeraj: (I) Add internal-only resumable gallery download queue with persistence/restart fixes and completion banner updates
-- Ashil: Enable single file download for locally existing uploaded files.
-- Laurens: (i) Use usearch vectorDB for magic search and discover section
-- Laurens: Make it possible to ignore already named persons
-- Neeraj: Fix iOS native video crash by avoiding FFprobe on problematic files, harden seekbar null handling, and stop audio on swipe dismiss
-- Ashil: Fix pinch to zoom opening info sheet on video
-- Neeraj: Refresh Security toggles with latest account state (2FA + email verification)
-- Ashil: Fix file picker galleries (that come up with bottom sheet) getting clipped on wide enough screens
-- Neeraj: (i) Show incoming photos in feed
-- Neeraj: Remove internal-user gating for extended collage layouts
-- Ashil: Improve free up device space experience on iOS if backedup shared iCloud albums exists 
-- Neeraj: (i) Reduce iOS Live Photo start flicker on long-press preview
-- Neeraj/Aman: Offline mode
+- Prateek: (i) Enable BG sync notifications by default for internal users on iOS
+- Prateek: (i) Add internal sync recovery diagnostics to classify local discovery vs remote upload-prep misses
+- Prateek: Background sync now short-circuits upload prep on mobile data when "Backup over mobile data" is disabled

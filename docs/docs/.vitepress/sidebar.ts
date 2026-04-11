@@ -24,6 +24,10 @@ export const sidebar = [
                     },
                     { text: "Sign up", link: "/photos/getting-started/signup" },
                     {
+                        text: "Gallery mode",
+                        link: "/photos/getting-started/gallery-mode",
+                    },
+                    {
                         text: "Migration",
                         link: "/photos/getting-started/migration",
                     },
@@ -82,6 +86,10 @@ export const sidebar = [
                             {
                                 text: "Passkeys",
                                 link: "/photos/features/account/passkeys",
+                            },
+                            {
+                                text: "App lock",
+                                link: "/photos/features/account/app-lock",
                             },
                             {
                                 text: "Referral program",
@@ -267,6 +275,10 @@ export const sidebar = [
                         link: "/photos/faq/account-creation",
                     },
                     {
+                        text: "Gallery Mode",
+                        link: "/photos/faq/gallery-mode",
+                    },
+                    {
                         text: "Advanced Features",
                         link: "/photos/faq/advanced-features",
                     },
@@ -447,6 +459,10 @@ export const sidebar = [
                                 text: "Public links",
                                 link: "/locker/features/sharing/public-links",
                             },
+                            {
+                                text: "Ente Paste",
+                                link: "/locker/features/sharing/ente-paste",
+                            },
                         ],
                     },
                     {
@@ -513,6 +529,17 @@ export const sidebar = [
                         link: "/locker/faq/troubleshooting",
                     },
                 ],
+            },
+        ],
+    },
+    {
+        text: "Ensu",
+        collapsed: true,
+        items: [
+            { text: "Introduction", link: "/ensu/" },
+            {
+                text: "FAQ",
+                link: "/ensu/faq/",
             },
         ],
     },
@@ -595,6 +622,10 @@ export const sidebar = [
                     {
                         text: "Building mobile apps",
                         link: "/self-hosting/development/mobile-build",
+                    },
+                    {
+                        text: "Using Lima for development",
+                        link: "/self-hosting/development/lima",
                     },
                 ],
             },

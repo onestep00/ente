@@ -1,9 +1,9 @@
 import "dart:async";
-import "package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart";
-import "package:ffmpeg_kit_flutter_new/ffmpeg_kit_config.dart";
-import "package:ffmpeg_kit_flutter_new/ffmpeg_session.dart";
-import "package:ffmpeg_kit_flutter_new/ffprobe_kit.dart";
-import "package:ffmpeg_kit_flutter_new/statistics.dart";
+import "package:ffmpeg_kit_flutter/ffmpeg_kit.dart";
+import "package:ffmpeg_kit_flutter/ffmpeg_kit_config.dart";
+import "package:ffmpeg_kit_flutter/ffmpeg_session.dart";
+import "package:ffmpeg_kit_flutter/ffprobe_kit.dart";
+import "package:ffmpeg_kit_flutter/statistics.dart";
 import "package:photos/service_locator.dart";
 import "package:photos/utils/ffprobe_util.dart";
 

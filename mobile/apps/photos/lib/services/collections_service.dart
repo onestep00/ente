@@ -23,6 +23,7 @@ import 'package:photos/events/collection_updated_event.dart';
 import 'package:photos/events/files_updated_event.dart';
 import 'package:photos/events/force_reload_home_gallery_event.dart';
 import 'package:photos/events/local_photos_updated_event.dart';
+import "package:photos/gateways/collections/collection_share_gateway.dart";
 import 'package:photos/gateways/collections/models/collection_file_item.dart';
 import 'package:photos/gateways/collections/models/create_request.dart';
 import "package:photos/gateways/collections/models/metadata.dart";
@@ -38,6 +39,7 @@ import "package:photos/models/metadata/collection_magic.dart";
 import "package:photos/service_locator.dart";
 import 'package:photos/services/app_lifecycle_service.dart';
 import "package:photos/services/favorites_service.dart";
+import 'package:photos/services/memory_share_service.dart';
 import 'package:photos/services/sync/local_sync_service.dart';
 import 'package:photos/services/sync/remote_sync_service.dart';
 import "package:photos/utils/dialog_util.dart";
@@ -606,6 +608,18 @@ class CollectionsService {
     );
 
     return SharedCollections(outgoing, incoming, quickLinks);
+  }
+
+  Future<SharedCollectionsAndMemoryLinks>
+      getSharedCollectionsAndMemoryLinks() async {
+    final collections = await getSharedCollections();
+    try {
+      final memoryLinks = await MemoryShareService.instance.listMemoryShares();
+      return SharedCollectionsAndMemoryLinks(collections, memoryLinks);
+    } catch (e, s) {
+      _logger.severe("failed to load memory links", e, s);
+      return SharedCollectionsAndMemoryLinks(collections, []);
+    }
   }
 
   Future<List<Collection>> getCollectionForOnEnteSection() async {
@@ -1491,7 +1505,7 @@ class CollectionsService {
     }
   }
 
-  Future<Collection> getCollectionFromPublicLink(
+  Future<Collection?> getCollectionFromPublicLink(
     BuildContext context,
     Uri uri,
   ) async {
@@ -1530,22 +1544,43 @@ class CollectionsService {
 
       collection.setName(_getDecryptedCollectionName(collection));
       return collection;
+    } on PublicCollectionInfoExpiredException catch (e, s) {
+      _logger.warning("Public collection link expired", e, s);
+      await showInfoDialog(
+        context,
+        title: AppLocalizations.of(context).linkExpired,
+        body:
+            AppLocalizations.of(context).theLinkYouAreTryingToAccessHasExpired,
+      );
+      return null;
+    } on PublicCollectionDeviceLimitExceededException catch (e, s) {
+      _logger.warning("Public collection link device limit reached", e, s);
+      await showErrorDialog(
+        context,
+        AppLocalizations.of(context).canNotOpenTitle,
+        AppLocalizations.of(context).linkRequestLimitExceeded,
+      );
+      return null;
+    } on PublicCollectionRateLimitedException catch (e, s) {
+      _logger.warning("Public collection link request rate limited", e, s);
+      await showErrorDialog(
+        context,
+        AppLocalizations.of(context).canNotOpenTitle,
+        AppLocalizations.of(context).linkRequestLimitExceeded,
+      );
+      return null;
+    } on PublicCollectionInfoUnauthorizedException catch (e, s) {
+      _logger.warning("Public collection link is unauthorized", e, s);
+      await showErrorDialog(
+        context,
+        AppLocalizations.of(context).canNotOpenTitle,
+        AppLocalizations.of(context).canNotOpenBody,
+      );
+      return null;
     } catch (e, s) {
       _logger.warning(e, s);
       _logger.severe("Failed to fetch public collection");
-      if (e is DioException && e.response?.statusCode == 410) {
-        await showInfoDialog(
-          context,
-          title: AppLocalizations.of(context).linkExpired,
-          body: AppLocalizations.of(context)
-              .theLinkYouAreTryingToAccessHasExpired,
-        );
-        throw UnauthorizedError();
-      }
       await showGenericErrorDialog(context: context, error: e);
-      if (e is DioException && e.response?.statusCode == 401) {
-        throw UnauthorizedError();
-      }
       rethrow;
     }
   }

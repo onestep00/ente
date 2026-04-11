@@ -44,7 +44,7 @@ class ClusterSuggestion {
 class ClusterFeedbackService<T> {
   final Logger _logger = Logger("ClusterFeedbackService");
   final _computer = Computer.shared();
-  static const int _allPeopleSuggestionNamedSampleLimit = 40;
+  static const int _allPeopleSuggestionNamedSampleLimit = 20;
   static const int _allPeopleSuggestionVectorResultCount = 120;
 
   ClusterFeedbackService._privateConstructor();
@@ -1458,7 +1458,7 @@ class ClusterFeedbackService<T> {
 
   Future<void> _prepareClusterCentroidVectorDbForSuggestionsInternal() async {
     try {
-      if (!flagService.usearchForSearch) return;
+      if (!flagService.usearchForSuggestions) return;
       if (!flagService.hasGrantedMLConsent) return;
       if (!await _clusterCentroidVectorDB.checkIfMigrationDone()) {
         await _mlDataDBForCentroidVectorDb
@@ -1479,7 +1479,7 @@ class ClusterFeedbackService<T> {
   }
 
   Future<bool> _canUseClusterCentroidVectorDbForSuggestions() async {
-    if (!flagService.usearchForSearch) return false;
+    if (!flagService.usearchForSuggestions) return false;
     if (!flagService.hasGrantedMLConsent) return false;
     if (await _clusterCentroidVectorDB.checkIfMigrationDone()) return true;
     unawaited(_prepareClusterCentroidVectorDbForSuggestions());

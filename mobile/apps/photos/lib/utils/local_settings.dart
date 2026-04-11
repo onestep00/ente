@@ -1,3 +1,5 @@
+import "dart:io";
+
 import 'package:flutter/foundation.dart';
 import 'package:photos/app_mode.dart';
 import 'package:photos/core/constants.dart';
@@ -74,6 +76,8 @@ class LocalSettings {
   static const kShowLocalIDOverThumbnails = "show_local_id_over_thumbnails";
   static const kEnableDatabaseLogging = "enable_db_logging";
   static const _kInternalUserDisabled = "ls.internal_user_disabled";
+  static const _kBGDebugNotificationsEnabled =
+      "ls.bg_debug_notifications_enabled";
   static const _kCFUploadProxyEnabled = "ls.cf_upload_proxy_enabled";
   static const _kSharedPhotoFeedCutoffTime = "ls.shared_photo_feed_cutoff_time";
   static const _kWrapped2025ResumeIndex = "ls.wrapped_2025_resume_index";
@@ -81,9 +85,14 @@ class LocalSettings {
   static const _kAppLockEnabled = "ls.app_lock_enabled";
   static const _memoryLaneSeenKey = "faces_timeline_seen_person_ids";
   static const _kChristmasBannerEnabled = "ls.christmas_banner_enabled";
+  static const _kPetRecognitionEnabled = "ls.pet_recognition_enabled";
   static const _kAutoMergeThresholdOverride = "ml_debug.auto_merge_threshold";
   static const _kDefaultClusteringDistanceOverride =
       "ml_debug.default_clustering_distance";
+  static const _kRunMLDuringInteractionOverride =
+      "ml_debug.run_ml_during_interaction";
+  static const _kSemanticSearchExactInRustEnabled =
+      "ml_debug.semantic_search_exact_in_rust";
   static const _kAppMode = "ls.app_mode";
   static const _kShowOfflineModeOption = "ls.show_offline_mode_option";
 
@@ -274,11 +283,17 @@ class LocalSettings {
     await _setFlag(OfflineFlag.mapEnabled, value);
   }
 
+  String get _mlLocalIndexingKey => appMode == AppMode.offline
+      ? _kOfflineMLLocalIndexingEnabled
+      : _kisMLLocalIndexingEnabled;
+
+  bool get _defaultMLLocalIndexingEnabled => appMode == AppMode.offline
+      ? enoughRamForOfflineLocalIndexing
+      : enoughRamForLocalIndexing;
+
   bool get isMLLocalIndexingEnabled {
-    final key = appMode == AppMode.offline
-        ? _kOfflineMLLocalIndexingEnabled
-        : _kisMLLocalIndexingEnabled;
-    return _prefs.getBool(key) ?? enoughRamForLocalIndexing;
+    return _prefs.getBool(_mlLocalIndexingKey) ??
+        _defaultMLLocalIndexingEnabled;
   }
 
   bool get isSmartMemoriesEnabled =>
@@ -304,6 +319,27 @@ class LocalSettings {
       return;
     }
     await _prefs.setDouble(_kDefaultClusteringDistanceOverride, value);
+  }
+
+  bool get petRecognitionEnabled =>
+      _prefs.getBool(_kPetRecognitionEnabled) ?? false;
+
+  Future<void> togglePetRecognition() async {
+    await _prefs.setBool(_kPetRecognitionEnabled, !petRecognitionEnabled);
+  }
+
+  bool get runMLDuringInteractionOverride =>
+      _prefs.getBool(_kRunMLDuringInteractionOverride) ?? false;
+
+  Future<void> setRunMLDuringInteractionOverride(bool value) async {
+    await _prefs.setBool(_kRunMLDuringInteractionOverride, value);
+  }
+
+  bool get semanticSearchExactInRustEnabled =>
+      _prefs.getBool(_kSemanticSearchExactInRustEnabled) ?? false;
+
+  Future<void> setSemanticSearchExactInRustEnabled(bool value) async {
+    await _prefs.setBool(_kSemanticSearchExactInRustEnabled, value);
   }
 
   Future<bool> setSmartMemories(bool value) async {
@@ -337,11 +373,9 @@ class LocalSettings {
 
   /// toggleFaceIndexing toggles the face indexing setting and returns the new value
   Future<bool> toggleLocalMLIndexing() async {
-    final key = appMode == AppMode.offline
-        ? _kOfflineMLLocalIndexingEnabled
-        : _kisMLLocalIndexingEnabled;
-    final nextValue = !(_prefs.getBool(key) ?? enoughRamForLocalIndexing);
-    await _prefs.setBool(key, nextValue);
+    final nextValue = !(_prefs.getBool(_mlLocalIndexingKey) ??
+        _defaultMLLocalIndexingEnabled);
+    await _prefs.setBool(_mlLocalIndexingKey, nextValue);
     return nextValue;
   }
 
@@ -430,6 +464,14 @@ class LocalSettings {
 
   Future<void> setInternalUserDisabled(bool value) async {
     await _prefs.setBool(_kInternalUserDisabled, value);
+  }
+
+  bool get isBGDebugNotificationsEnabled =>
+      _prefs.getBool(_kBGDebugNotificationsEnabled) ??
+      (Platform.isAndroid ? false : true);
+
+  Future<void> setBGDebugNotificationsEnabled(bool value) async {
+    await _prefs.setBool(_kBGDebugNotificationsEnabled, value);
   }
 
   bool get isCFUploadProxyEnabled =>

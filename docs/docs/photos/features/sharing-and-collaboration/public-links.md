@@ -66,11 +66,11 @@ Public links support powerful customization, security, and control features:
 
 Choose how recipients view your public links with these layout options:
 
-**Grouped** (default): Photos are organized by date, making it easy to browse chronologically.
+**Masonry** (default): A dynamic grid that adapts to each photo’s size for a seamless layout.
 
-**Continuous**: Photos appear in a single continuous stream.
+**Trip**: Explore photos on an interactive map and timeline, perfect for travel and location-based albums.
 
-**Trip**: Photos appear on an interactive map and timeline, perfect for travel and location-based albums.
+**Grouped**: Photos are organized by date, making it easy to browse memories chronologically.
 
 > [!NOTE]
 >
@@ -268,15 +268,15 @@ Public links are end-to-end encrypted, but with an important caveat:
 - Use device limits to prevent wide sharing
 - Consider sharing albums directly with Ente users instead
 
-> Implementation details have been documented in our blog post: [Building shareable links](https://ente.io/blog/building-shareable-links/).
+> Implementation details have been documented in our blog post: [Building shareable links](https://ente.com/blog/building-shareable-links/).
 
 ## Availability
 
-Public links (including collect links and quick links) are available on all plans, including the free tier. Free plan users can create public links with a [device limit](https://ente.io/help/photos/features/sharing-and-collaboration/public-links#device-limits) of 5.
+Public links (including collect links and quick links) are available on all plans, including the free tier. Free plan users can create public links with a [device limit](https://ente.com/help/photos/features/sharing-and-collaboration/public-links#device-limits) of 5.
 
 **Free users can:**
 
-- Create public links ([device limit](https://ente.io/help/photos/features/sharing-and-collaboration/public-links#device-limits) of 5)
+- Create public links ([device limit](https://ente.com/help/photos/features/sharing-and-collaboration/public-links#device-limits) of 5)
 - View public links shared with them
 - Add photos to collect links shared with them
 - Create and receive shared albums

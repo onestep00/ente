@@ -136,6 +136,12 @@ var ErrUserNotRegistered = &ApiError{
 	Message:        "User is not registered",
 }
 
+var ErrUserSignupIncomplete = &ApiError{
+	Code:           UserSignupIncomplete,
+	HttpStatusCode: http.StatusNotFound,
+	Message:        "User signup is incomplete",
+}
+
 var ErrCollectionNotEmpty = ApiError{
 	Code:           CollectionNotEmpty,
 	HttpStatusCode: http.StatusConflict,
@@ -247,8 +253,9 @@ type ErrorCode string
 
 const (
 	// Standard, generic error codes
-	BadRequest ErrorCode = "BAD_REQUEST"
-	CONFLICT   ErrorCode = "CONFLICT"
+	BadRequest    ErrorCode = "BAD_REQUEST"
+	CONFLICT      ErrorCode = "CONFLICT"
+	AlreadyExists ErrorCode = "ALREADY_EXISTS"
 
 	InternalError ErrorCode = "INTERNAL_ERROR"
 
@@ -256,6 +263,9 @@ const (
 
 	// Business specific error codes
 	FamiliySizeLimitExceeded ErrorCode = "FAMILY_SIZE_LIMIT_EXCEEDED"
+
+	// UserSignupIncomplete indicates that account exists but signup is not fully completed
+	UserSignupIncomplete ErrorCode = "USER_SIGNUP_INCOMPLETE"
 
 	// Subscription Already Associted with different account
 	SubscriptionAlreadyClaimed ErrorCode = "SUBSCRIPTION_ALREADY_CLAIMED"
@@ -367,6 +377,14 @@ func NewPermissionDeniedError(message string) *ApiError {
 func NewConflictError(message string) *ApiError {
 	return &ApiError{
 		Code:           CONFLICT,
+		HttpStatusCode: http.StatusConflict,
+		Message:        message,
+	}
+}
+
+func NewAlreadyExistsError(message string) *ApiError {
+	return &ApiError{
+		Code:           AlreadyExists,
 		HttpStatusCode: http.StatusConflict,
 		Message:        message,
 	}

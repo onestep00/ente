@@ -542,6 +542,32 @@ class AppLocalizationsEn extends AppLocalizations {
   String get termsOfServicesTitle => 'Terms';
 
   @override
+  String get checkForUpdates => 'Check for updates';
+
+  @override
+  String get checkingForUpdates => 'Checking for updates...';
+
+  @override
+  String get unableToCheckForUpdatesRightNow =>
+      'Unable to check for updates right now';
+
+  @override
+  String get youAreOnTheLatestVersion => 'You are on the latest version';
+
+  @override
+  String get aNewVersionOfEnteLockerIsAvailable =>
+      'A new version of Ente Locker is available.';
+
+  @override
+  String get criticalUpdateAvailable => 'Critical update available';
+
+  @override
+  String get updateAvailable => 'Update available';
+
+  @override
+  String get downloadUpdate => 'Download update';
+
+  @override
   String get support => 'Support';
 
   @override
@@ -1016,7 +1042,7 @@ class AppLocalizationsEn extends AppLocalizations {
   String get sendInvite => 'Send invite';
 
   @override
-  String get shareTextRecommendUsingEnte => 'Download Ente\n\nhttps://ente.io';
+  String get shareTextRecommendUsingEnte => 'Download Ente\n\nhttps://ente.com';
 
   @override
   String get thisIsYourVerificationId => 'This is your Verification ID';
@@ -1049,12 +1075,12 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String shareMyVerificationID(Object verificationID) {
-    return 'Here\'s my verification ID: $verificationID for ente.io.';
+    return 'Here\'s my verification ID: $verificationID for ente.com.';
   }
 
   @override
   String shareTextConfirmOthersVerificationID(Object verificationID) {
-    return 'Hey, can you confirm that this is your ente.io verification ID: $verificationID';
+    return 'Hey, can you confirm that this is your ente.com verification ID: $verificationID';
   }
 
   @override
@@ -1163,6 +1189,13 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String get uploadStorageLimitErrorBody =>
       'You\'ve run out of storage space. Free up space to continue uploading.';
+
+  @override
+  String get uploadSubscriptionExpiredErrorTitle => 'Subscription expired';
+
+  @override
+  String get uploadSubscriptionExpiredErrorBody =>
+      'Your Ente Photos subscription has expired. Renew your subscription to continue uploading.';
 
   @override
   String get uploadFileCountLimitErrorTitle => 'File limit reached';
@@ -1771,4 +1804,16 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String get authToViewYourActiveSessions =>
       'Please authenticate to view your active sessions';
+
+  @override
+  String deleteAccountFeedbackPrompt(String email) {
+    return 'Something not working? Reach out at $email, we\'d love to help.';
+  }
+
+  @override
+  String get sendFeedback => 'Send feedback';
+
+  @override
+  String get deleteAccountPermanentWarning =>
+      'This will permanently delete your Ente Auth, Photos, and Locker data';
 }

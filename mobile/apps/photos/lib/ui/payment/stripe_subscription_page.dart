@@ -19,8 +19,8 @@ import 'package:photos/ui/common/web_page.dart';
 import 'package:photos/ui/components/buttons/button_widget.dart';
 import 'package:photos/ui/components/buttons/button_widget_v2.dart';
 import "package:photos/ui/components/menu_item_widget/menu_item_widget_new.dart";
+import 'package:photos/ui/family/family_plan_page.dart';
 import 'package:photos/ui/notification/toast.dart';
-import 'package:photos/ui/payment/child_subscription_widget.dart';
 import 'package:photos/ui/payment/payment_web_page.dart';
 import 'package:photos/ui/payment/subscription_common_widgets.dart';
 import 'package:photos/ui/payment/subscription_plan_widget.dart';
@@ -51,6 +51,7 @@ class _StripeSubscriptionPageState extends State<StripeSubscriptionPage> {
   // indicates if user's subscription plan is still active
   late bool _hasActiveSubscription;
   bool _hideCurrentPlanSelection = false;
+  late FreePlan _freePlan;
   List<BillingPlan> _plans = [];
   bool _hasLoadedData = false;
   bool _isLoading = false;
@@ -66,6 +67,19 @@ class _StripeSubscriptionPageState extends State<StripeSubscriptionPage> {
         .then((userDetails) async {
       _userDetails = userDetails;
       _currentSubscription = userDetails.subscription;
+
+      if (_userDetails.isPartOfFamily() && !_userDetails.isFamilyAdmin()) {
+        if (mounted) {
+          replacePage(
+            context,
+            FamilyPlanPage(
+              initialUserDetails: _userDetails,
+              refreshOnOpen: false,
+            ),
+          );
+        }
+        return;
+      }
 
       _showYearlyPlan = _currentSubscription!.isYearlyPlan();
       _hideCurrentPlanSelection =
@@ -89,8 +103,9 @@ class _StripeSubscriptionPageState extends State<StripeSubscriptionPage> {
   // _filterPlansForUI is used for initializing initState & plan toggle states
   Future<void> _filterStripeForUI() async {
     final billingPlans = await _billingService.getBillingPlans();
+    _freePlan = billingPlans.freePlan;
     _plans = billingPlans.plans.where((plan) {
-      if (plan.stripeID.isEmpty) {
+      if (plan.id == freeProductID || plan.stripeID.isEmpty) {
         return false;
       }
       final isYearlyPlan = plan.period == 'year';
@@ -128,9 +143,6 @@ class _StripeSubscriptionPageState extends State<StripeSubscriptionPage> {
   Widget build(BuildContext context) {
     colorScheme = getEnteColorScheme(context);
     final textTheme = getEnteTextTheme(context);
-    final bool isFamilyChildUser = _hasLoadedData &&
-        _userDetails.isPartOfFamily() &&
-        !_userDetails.isFamilyAdmin();
 
     return Scaffold(
       backgroundColor: colorScheme.backgroundColour,
@@ -144,15 +156,13 @@ class _StripeSubscriptionPageState extends State<StripeSubscriptionPage> {
             Navigator.of(context).pop();
           },
         ),
-        title: isFamilyChildUser
-            ? null
-            : Text(
-                widget.isOnboarding
-                    ? AppLocalizations.of(context).selectYourPlan
-                    : AppLocalizations.of(context).subscription,
-                style: textTheme.largeBold,
-              ),
-        centerTitle: !isFamilyChildUser,
+        title: Text(
+          widget.isOnboarding
+              ? AppLocalizations.of(context).chooseYourPlan
+              : AppLocalizations.of(context).subscription,
+          style: textTheme.largeBold,
+        ),
+        centerTitle: true,
       ),
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -160,9 +170,7 @@ class _StripeSubscriptionPageState extends State<StripeSubscriptionPage> {
           Expanded(child: _getBody()),
         ],
       ),
-      bottomNavigationBar: widget.isOnboarding &&
-              _hasLoadedData &&
-              !(_userDetails.isPartOfFamily() && !_userDetails.isFamilyAdmin())
+      bottomNavigationBar: widget.isOnboarding && _hasLoadedData
           ? Container(
               color: colorScheme.backgroundColour,
               child: SafeArea(
@@ -194,11 +202,7 @@ class _StripeSubscriptionPageState extends State<StripeSubscriptionPage> {
       _fetchSub();
     }
     if (_hasLoadedData) {
-      if (_userDetails.isPartOfFamily() && !_userDetails.isFamilyAdmin()) {
-        return ChildSubscriptionWidget(userDetails: _userDetails);
-      } else {
-        return _buildPlans();
-      }
+      return _buildPlans();
     }
     return const EnteLoadingWidget();
   }
@@ -208,6 +212,7 @@ class _StripeSubscriptionPageState extends State<StripeSubscriptionPage> {
 
     widgets.add(
       SubscriptionToggle(
+        isYearly: _showYearlyPlan,
         onToggle: (p0) {
           _showYearlyPlan = p0;
           _filterStripeForUI();
@@ -252,13 +257,34 @@ class _StripeSubscriptionPageState extends State<StripeSubscriptionPage> {
           child: MenuItemWidgetNew(
             title: AppLocalizations.of(context).manageFamily,
             menuItemColor: colorScheme.fillFaint,
+            pressedColor: colorScheme.fillFaintPressed,
             trailingWidget: Icon(
               Icons.chevron_right_outlined,
               color: colorScheme.strokeBase,
             ),
+            showOnlyLoadingState: true,
+            surfaceExecutionStates: true,
             onTap: () async {
-              // ignore: unawaited_futures
-              _billingService.launchFamilyPortal(context, _userDetails);
+              late final UserDetails userDetails;
+              try {
+                userDetails =
+                    await _userService.getUserDetailsV2(memoryCount: false);
+              } catch (error) {
+                if (!context.mounted) {
+                  return;
+                }
+                await showGenericErrorDialog(context: context, error: error);
+                return;
+              }
+              if (!context.mounted) {
+                return;
+              }
+              await _billingService.launchFamilyPortal(
+                context,
+                userDetails,
+                popOnFreeAdvertViewPlans: true,
+                refreshOnOpen: false,
+              );
             },
           ),
         ),
@@ -273,6 +299,7 @@ class _StripeSubscriptionPageState extends State<StripeSubscriptionPage> {
           child: MenuItemWidgetNew(
             title: "Manage payment method",
             menuItemColor: colorScheme.fillFaint,
+            pressedColor: colorScheme.fillFaintPressed,
             trailingWidget: Icon(
               Icons.chevron_right_outlined,
               color: colorScheme.strokeBase,
@@ -370,6 +397,7 @@ class _StripeSubscriptionPageState extends State<StripeSubscriptionPage> {
       alwaysShowSuccessState: false,
       surfaceExecutionStates: false,
       menuItemColor: colorScheme.fillFaint,
+      pressedColor: colorScheme.fillFaintPressed,
       trailingWidget: Icon(
         Icons.chevron_right_outlined,
         color: colorScheme.strokeBase,
@@ -445,6 +473,30 @@ class _StripeSubscriptionPageState extends State<StripeSubscriptionPage> {
 
   List<Widget> _getStripePlanWidgets() {
     final List<Widget> planWidgets = [];
+    if (_shouldShowFreePlanCard()) {
+      planWidgets.add(
+        GestureDetector(
+          onTap: () {
+            if (!widget.isOnboarding) {
+              return;
+            }
+            setState(() {
+              _selectedPlanProductID = freeProductID;
+            });
+          },
+          child: SubscriptionPlanWidget(
+            storage: _freePlan.storage,
+            price: "",
+            period: AppLocalizations.of(context).freeTrial,
+            isActive: widget.isOnboarding
+                ? _selectedPlanProductID == freeProductID
+                : _isFreePlanUser(),
+            isOnboarding: widget.isOnboarding,
+          ),
+        ),
+      );
+    }
+
     for (final plan in _plans) {
       final productID = plan.stripeID;
       if (productID.isEmpty) {
@@ -543,6 +595,15 @@ class _StripeSubscriptionPageState extends State<StripeSubscriptionPage> {
     return popularProductIDs.contains(plan.id);
   }
 
+  bool _isFreePlanUser() {
+    return _currentSubscription != null &&
+        _currentSubscription!.productID == freeProductID;
+  }
+
+  bool _shouldShowFreePlanCard() {
+    return widget.isOnboarding || _isFreePlanUser();
+  }
+
   void _syncOnboardingSelection() {
     if (!widget.isOnboarding) {
       return;
@@ -551,6 +612,11 @@ class _StripeSubscriptionPageState extends State<StripeSubscriptionPage> {
         .map((plan) => plan.stripeID)
         .where((id) => id.isNotEmpty)
         .toSet();
+    final hasFreeOptionVisible = _shouldShowFreePlanCard();
+
+    if (_selectedPlanProductID == freeProductID && hasFreeOptionVisible) {
+      return;
+    }
     if (_selectedPlanProductID != null &&
         visibleProductIDs.contains(_selectedPlanProductID)) {
       return;
@@ -559,6 +625,10 @@ class _StripeSubscriptionPageState extends State<StripeSubscriptionPage> {
     if (currentProductID != null &&
         visibleProductIDs.contains(currentProductID)) {
       _selectedPlanProductID = currentProductID;
+      return;
+    }
+    if (hasFreeOptionVisible) {
+      _selectedPlanProductID = freeProductID;
       return;
     }
     _selectedPlanProductID =

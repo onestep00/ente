@@ -6,7 +6,8 @@ description: Migrating your existing photos from Google Photos to Ente Photos
 # Import from Google Photos
 
 Follow the following steps to recover your data from Google Photos and preserve
-it with Ente.
+it with Ente. Also, please check out our
+[Migration FAQ](/photos/faq/migration) page for common queries.
 
 ### Steps
 
@@ -38,12 +39,16 @@ it with Ente.
 
 8. Wait for Google to send you your data.
 
-9. Open [our desktop app](https://ente.io/download/desktop) and click on "Upload", then select "Google takeout".
+9. Open [our desktop app](https://ente.com/download/desktop) and click on "Upload", then select "Google takeout".
 
     ![Importing Google Takeout into Ente](google-takeout.png){width=400px}
 
     You'll see two options:
-    - **Select folder (recommended): If you have multiple ZIP files, extract them all into one folder first, then select that folder. This ensures proper metadata matching ([details](/photos/faq/metadata-and-editing#importing-from-google-takeout)).**
+    - **Select folder (recommended): If you have multiple ZIP files, extract
+      them all into one parent folder first, then select that parent folder.
+      Keep subfolders as-is (do not flatten everything into one giant folder).
+      This ensures proper metadata matching
+      ([details](/photos/faq/metadata-and-editing#importing-from-google-takeout)).**
     - **Select zips**: Choose your ZIP files directly without extracting. Convenient but may not properly match metadata if files are split across ZIPs.
 
         ![Google Takeout Selection](google-photos-6.webp)
@@ -68,7 +73,7 @@ In case your uploads get interrupted, just drag and drop the folder or files aga
 
 If you run into any issues during this migration, please check out our
 [Migration FAQ](/photos/faq/migration#importing-from-google-photos) page or reach out to
-[support@ente.io](mailto:support@ente.io) and we will be happy to help you!
+[support@ente.com](mailto:support@ente.com) and we will be happy to help you!
 
 > [!TIP]
 >

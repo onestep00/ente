@@ -1,5 +1,6 @@
 // TODO: Audit this file
 import { AllAlbums } from "components/Collections/AllAlbums";
+import { AllPeople } from "components/Collections/AllPeople";
 import {
     CollectionShare,
     type CollectionShareIntent,
@@ -23,6 +24,10 @@ import {
 } from "ente-new/photos/components/gallery/ListHeader";
 import { PeopleHeader } from "ente-new/photos/components/gallery/PeopleHeader";
 import {
+    sortPeople,
+    type PeopleSortBy,
+} from "ente-new/photos/components/people-sort";
+import {
     collectionsSortBy,
     haveOnlySystemCollections,
     PseudoCollectionID,
@@ -44,7 +49,10 @@ type GalleryBarAndListHeaderProps = Omit<
     | "onSelectCollectionID"
     | "collectionsSortBy"
     | "onChangeCollectionsSortBy"
+    | "peopleSortBy"
+    | "onChangePeopleSortBy"
     | "onShowAllAlbums"
+    | "onShowAllPeople"
 > & {
     /**
      * When `true`, the bar is be hidden altogether.
@@ -57,6 +65,7 @@ type GalleryBarAndListHeaderProps = Omit<
     saveGroups: SaveGroup[];
 } & Pick<
         CollectionHeaderProps,
+        | "files"
         | "onRemotePull"
         | "onAddSaveGroup"
         | "onMarkTempDeleted"
@@ -67,6 +76,8 @@ type GalleryBarAndListHeaderProps = Omit<
         | "collectionNameByID"
         | "onSelectCollection"
         | "onSelectPerson"
+        | "canSetAlbumCover"
+        | "onSetAlbumCover"
     > &
     Pick<
         CollectionShareProps,
@@ -105,10 +116,13 @@ export const GalleryBarAndListHeader: React.FC<
     setBlockingLoad,
     people,
     saveGroups,
+    files,
     activePerson,
     emailByUserID,
     shareSuggestionEmails,
     onRemotePull,
+    canSetAlbumCover,
+    onSetAlbumCover,
     onAddSaveGroup,
     onMarkTempDeleted,
     onAddFileToCollection,
@@ -121,6 +135,8 @@ export const GalleryBarAndListHeader: React.FC<
     setFileListHeader,
 }) => {
     const { show: showAllAlbums, props: allAlbumsVisibilityProps } =
+        useModalVisibility();
+    const { show: showAllPeople, props: allPeopleVisibilityProps } =
         useModalVisibility();
     const { show: showCollectionShare, props: collectionShareVisibilityProps } =
         useModalVisibility();
@@ -146,6 +162,8 @@ export const GalleryBarAndListHeader: React.FC<
 
     const [collectionsSortBy, setCollectionsSortBy] =
         useCollectionsSortByLocalState("updation-time-desc");
+    const [peopleSortBy, setPeopleSortBy] =
+        useState<PeopleSortBy>("count-desc");
 
     const shouldBeHidden = useMemo(
         () =>
@@ -162,6 +180,10 @@ export const GalleryBarAndListHeader: React.FC<
                 collectionsSortBy,
             ).sort((a, b) => b.sortPriority - a.sortPriority),
         [collectionsSortBy, toShowCollectionSummaries],
+    );
+    const sortedPeople = useMemo(
+        () => sortPeople(people, peopleSortBy),
+        [people, peopleSortBy],
     );
 
     const isActiveCollectionDownloadInProgress = useCallback(() => {
@@ -190,6 +212,7 @@ export const GalleryBarAndListHeader: React.FC<
                 <CollectionHeader
                     {...{
                         activeCollection,
+                        files,
                         setActiveCollectionID,
                         isActiveCollectionDownloadInProgress,
                         onRemotePull,
@@ -207,6 +230,8 @@ export const GalleryBarAndListHeader: React.FC<
                     onCollectionShare={openCollectionShare}
                     onCollectionManageLink={openCollectionManageLink}
                     onCollectionCast={showCollectionCast}
+                    canSetAlbumCover={canSetAlbumCover}
+                    onSetAlbumCover={onSetAlbumCover}
                 />
             ) : mode != "people" && collectionSummary ? (
                 <GalleryItemsHeaderAdapter>
@@ -233,6 +258,7 @@ export const GalleryBarAndListHeader: React.FC<
         activeCollection,
         activeCollectionID,
         isActiveCollectionDownloadInProgress,
+        files,
         activePerson,
         showCollectionShare,
         openCollectionShare,
@@ -248,6 +274,8 @@ export const GalleryBarAndListHeader: React.FC<
         collectionNameByID,
         onSelectCollection,
         onSelectPerson,
+        canSetAlbumCover,
+        onSetAlbumCover,
         // TODO: Cluster
         // This causes a loop since it is an array dep
         // people,
@@ -264,14 +292,17 @@ export const GalleryBarAndListHeader: React.FC<
                     mode,
                     onChangeMode,
                     activeCollectionID,
-                    people,
+                    people: sortedPeople,
                     activePerson,
                     onSelectPerson,
                     collectionsSortBy,
+                    peopleSortBy,
                 }}
                 onSelectCollectionID={setActiveCollectionID}
                 onChangeCollectionsSortBy={setCollectionsSortBy}
+                onChangePeopleSortBy={setPeopleSortBy}
                 onShowAllAlbums={showAllAlbums}
+                onShowAllPeople={showAllPeople}
                 collectionSummaries={sortedCollectionSummaries.filter(
                     (cs) => !cs.attributes.has("hideFromCollectionBar"),
                 )}
@@ -287,6 +318,13 @@ export const GalleryBarAndListHeader: React.FC<
                 collectionsSortBy={collectionsSortBy}
                 isInHiddenSection={mode == "hidden-albums"}
                 onRemotePull={onRemotePull}
+            />
+            <AllPeople
+                {...allPeopleVisibilityProps}
+                people={sortedPeople}
+                onSelectPerson={onSelectPerson}
+                peopleSortBy={peopleSortBy}
+                onChangePeopleSortBy={setPeopleSortBy}
             />
             {activeCollection && (
                 <>

@@ -16,8 +16,9 @@ import type {
 } from "./types";
 
 const WLLAMA_VERSION = "2.3.7";
-const CDN_BASE = `https://unpkg.com/@wllama/wllama@${WLLAMA_VERSION}/esm`;
+const CDN_BASE = `https://cdn.jsdelivr.net/npm/@wllama/wllama@${WLLAMA_VERSION}/src`;
 const MIN_GGUF_BYTES = 1024 * 1024;
+const DEFAULT_GENERATION_MAX_TOKENS = 8_192;
 
 export type WasmProgressCallback = (event: {
     loaded: number;
@@ -421,7 +422,8 @@ class WasmInference implements InferenceBackend {
             );
 
             const sampling = buildSamplingConfig(request);
-            const maxTokens = request.maxTokens ?? 128;
+            const maxTokens =
+                request.maxTokens ?? DEFAULT_GENERATION_MAX_TOKENS;
 
             const stream = await this.wllama.createCompletion(prompt, {
                 stream: true,
@@ -605,6 +607,7 @@ class TauriInference implements InferenceBackend {
         request: GenerateChatRequest,
         onEvent?: (event: GenerateEvent) => void,
     ): Promise<GenerateSummary> {
+        const panicJobId = 0;
         let resolvedJobId: number | null = null;
         let errorMessage: string | null = null;
 
@@ -634,6 +637,11 @@ class TauriInference implements InferenceBackend {
             }
 
             if (payload.type === "error") {
+                if (payload.job_id === panicJobId) {
+                    rejectSummary(new Error(payload.message));
+                    void unlisten();
+                    return;
+                }
                 errorMessage = payload.message;
             }
 
