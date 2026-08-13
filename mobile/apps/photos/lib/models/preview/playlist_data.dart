@@ -6,6 +6,7 @@ class PlaylistData {
   int? height;
   int? size;
   int? durationInSeconds;
+  String? generator;
 
   PlaylistData({
     required this.preview,
@@ -13,5 +14,6 @@ class PlaylistData {
     this.height,
     this.size,
     this.durationInSeconds,
+    this.generator,
   });
 }

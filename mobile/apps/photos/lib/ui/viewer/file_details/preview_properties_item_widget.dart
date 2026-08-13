@@ -69,6 +69,13 @@ class _PreviewPropertiesItemWidgetState
       );
     }
 
+    subSectionWidgets.add(
+      Text(
+        "Generator: ${data.generator ?? 'unversioned'}",
+        style: textStyle,
+      ),
+    );
+
     if ((widget.file.fileType == FileType.video) &&
         (widget.file.localID != null || widget.file.duration != 0) &&
         data.size != null) {

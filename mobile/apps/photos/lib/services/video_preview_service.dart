@@ -1342,6 +1342,7 @@ class VideoPreviewService {
           'width': width,
           'height': height,
           'size': objectSize,
+          'generator': 'ente-ffmpeg-v1',
         },
         encryptionKey,
       );
@@ -1400,6 +1401,7 @@ class VideoPreviewService {
   Future<PlaylistData?> _getPlaylist(EnteFile file) async {
     _logger.fine("Getting playlist for $file");
     int? width, height, size;
+    String? generator;
 
     try {
       late final String objectID;
@@ -1425,11 +1427,32 @@ class VideoPreviewService {
       String finalPlaylist;
       if (playlistCache != null) {
         finalPlaylist = playlistCache.file.readAsStringSync();
+        Map<String, dynamic>? details;
         if (detailsCache != null) {
-          final details = json.decode(detailsCache.file.readAsStringSync());
-          width = details["width"];
-          height = details["height"];
-          size = details["size"];
+          final Map<String, dynamic> cachedDetails =
+              json.decode(detailsCache.file.readAsStringSync());
+          details = cachedDetails;
+          width = cachedDetails["width"];
+          height = cachedDetails["height"];
+          size = cachedDetails["size"];
+          generator = cachedDetails["generator"];
+        }
+
+        if (details == null || !details.containsKey("generator")) {
+          final playlistData = await _getPlaylistData(file);
+          width ??= playlistData["width"];
+          height ??= playlistData["height"];
+          size ??= playlistData["size"];
+          generator = playlistData["generator"];
+          unawaited(
+            _cachePlaylistDetails(
+              objectID,
+              width: width,
+              height: height,
+              size: size,
+              generator: generator,
+            ),
+          );
         }
       } else {
         final Map<String, dynamic> playlistData = await _getPlaylistData(file);
@@ -1437,6 +1460,7 @@ class VideoPreviewService {
         width = playlistData["width"];
         height = playlistData["height"];
         size = playlistData["size"];
+        generator = playlistData["generator"];
         unawaited(
           cacheManager.putFile(
             _getCacheKey(objectID),
@@ -1444,15 +1468,12 @@ class VideoPreviewService {
           ),
         );
         unawaited(
-          cacheManager.putFile(
-            _getDetailsCacheKey(objectID),
-            Uint8List.fromList(
-              json.encode({
-                "width": width,
-                "height": height,
-                "size": size,
-              }).codeUnits,
-            ),
+          _cachePlaylistDetails(
+            objectID,
+            width: width,
+            height: height,
+            size: size,
+            generator: generator,
           ),
         );
       }
@@ -1497,6 +1518,7 @@ class VideoPreviewService {
         height: height,
         size: size,
         durationInSeconds: parseDurationFromHLS(finalPlaylist),
+        generator: generator,
       );
       if (shouldAppendPreview) {
         fileDataService.appendPreview(file.uploadedFileID!, objectID, size!);
@@ -1505,6 +1527,26 @@ class VideoPreviewService {
     } catch (_) {
       rethrow;
     }
+  }
+
+  Future<void> _cachePlaylistDetails(
+    String objectID, {
+    required int? width,
+    required int? height,
+    required int? size,
+    required String? generator,
+  }) async {
+    await cacheManager.putFile(
+      _getDetailsCacheKey(objectID),
+      Uint8List.fromList(
+        json.encode({
+          "width": width,
+          "height": height,
+          "size": size,
+          "generator": generator,
+        }).codeUnits,
+      ),
+    );
   }
 
   Future<Map<String, dynamic>> _getPlaylistData(EnteFile file) async {
