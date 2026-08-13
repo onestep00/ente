@@ -10,6 +10,7 @@ import { Overlay } from "ente-base/components/containers";
 import { formattedDateRelative } from "ente-base/i18n-date";
 import log from "ente-base/log";
 import { downloadManager } from "ente-gallery/services/download";
+import { isHLSGenerationSupported } from "ente-gallery/services/video";
 import type { EnteFile } from "ente-media/file";
 import { fileDurationString } from "ente-media/file-metadata";
 import { FileType } from "ente-media/file-type";
@@ -29,6 +30,7 @@ import {
     thumbnailGap,
     type ThumbnailGridLayoutParams,
 } from "ente-new/photos/components/utils/thumbnail-grid-layout";
+import { useHLSGenerationStatusSnapshot } from "ente-new/photos/components/utils/use-snapshot";
 import {
     PseudoCollectionID,
     type CollectionSummary,
@@ -720,6 +722,17 @@ export const FileList: React.FC<FileListProps> = ({
         return count;
     }, [favoriteFileIDs, selected]);
 
+    const hlsStatus = useHLSGenerationStatusSnapshot();
+    const selectedOwnVideoCount = useMemo(() => {
+        if (!user || selected.ownCount == 0) return 0;
+        return annotatedFiles.filter(
+            ({ file }) =>
+                selected[file.id] &&
+                file.ownerID == user.id &&
+                file.metadata.fileType == FileType.video,
+        ).length;
+    }, [annotatedFiles, selected, user]);
+
     // Compute available context menu actions based on stable context and
     // the favorite status of the current selection (for toggling).
     const contextMenuActions = useMemo(() => {
@@ -731,6 +744,10 @@ export const FileList: React.FC<FileListProps> = ({
             showAddPerson: !!showAddPersonAction,
             showEditLocation: !!showEditLocationAction && selected.ownCount > 0,
             showSendLink: selected.ownCount > 0,
+            showRecreateStream:
+                isHLSGenerationSupported &&
+                !!hlsStatus?.enabled &&
+                selectedOwnVideoCount > 0,
         });
         if (!actions.includes("favorite")) return actions;
         if (
@@ -755,6 +772,8 @@ export const FileList: React.FC<FileListProps> = ({
         showAddPersonAction,
         showEditLocationAction,
         selected.ownCount,
+        selectedOwnVideoCount,
+        hlsStatus?.enabled,
         selectedFavoriteCount,
         selected.count,
     ]);

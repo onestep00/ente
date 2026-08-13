@@ -75,6 +75,8 @@ interface VideoProcessingQueueItem {
      * If `true`, recreate the stream even if one already exists.
      */
     forceRecreate?: boolean;
+    /** Process before other queued live uploads and backfill items. */
+    priority?: boolean;
 }
 
 const idleWaitInitial = 10 * 1000; /* 10 sec */
@@ -778,6 +780,7 @@ const enqueueVideoProcessingItems = (items: VideoProcessingQueueItem[]) => {
 
     let addedCount = 0;
     let updatedExisting = false;
+    const priorityItems: VideoProcessingQueueItem[] = [];
     for (const item of items) {
         const existing = queuedByID.get(item.file.id);
         if (existing) {
@@ -789,12 +792,26 @@ const enqueueVideoProcessingItems = (items: VideoProcessingQueueItem[]) => {
                 existing.timestampedUploadItem = item.timestampedUploadItem;
                 updatedExisting = true;
             }
+            if (item.priority) {
+                if (!existing.priority) {
+                    existing.priority = true;
+                    updatedExisting = true;
+                }
+                const index = _state.liveQueue.indexOf(existing);
+                if (index > 0) {
+                    _state.liveQueue.splice(index, 1);
+                    priorityItems.push(existing);
+                    updatedExisting = true;
+                }
+            }
             continue;
         }
-        _state.liveQueue.push(item);
+        if (item.priority) priorityItems.push(item);
+        else _state.liveQueue.push(item);
         queuedByID.set(item.file.id, item);
         addedCount += 1;
     }
+    _state.liveQueue.unshift(...priorityItems);
 
     if (addedCount === 0 && !updatedExisting) return;
 
@@ -865,8 +882,15 @@ export const recreateVideoStreams = (files: EnteFile[]) => {
     );
     if (videoFiles.length === 0) return;
 
+    log.info(
+        `Queued ${videoFiles.length} video(s) for priority stream recreation`,
+    );
     enqueueVideoProcessingItems(
-        videoFiles.map((file) => ({ file, forceRecreate: true })),
+        videoFiles.map((file) => ({
+            file,
+            forceRecreate: true,
+            priority: true,
+        })),
     );
 };
 
@@ -1412,7 +1436,9 @@ const processQueueItem = async ({
             throw e;
         }
 
-        log.info(`Generate HLS for ${fileLogID(file)} | done`);
+        log.info(
+            `Generate HLS for ${fileLogID(file)} | done | generator=${generator}`,
+        );
     } finally {
         await videoStreamDone(electron, playlistToken);
     }

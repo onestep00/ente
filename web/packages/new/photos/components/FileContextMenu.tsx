@@ -16,6 +16,7 @@ import {
     ViewOffSlashIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
+import ReplayIcon from "@mui/icons-material/Replay";
 import {
     ListItemIcon,
     ListItemText,
@@ -63,6 +64,7 @@ const hugeIcon = (icon: IconSvgElement, size = 20) => (
 const actionConfigs: Record<FileContextAction, ActionConfig> = {
     sendLink: { label: "Send link", Icon: hugeIcon(Navigation03Icon) },
     download: { label: "download", Icon: hugeIcon(Download01Icon) },
+    recreateStream: { label: "recreate_stream", Icon: <ReplayIcon /> },
     fixTime: { label: "fix_creation_time", Icon: hugeIcon(Time04Icon) },
     editLocation: { label: "edit_location", Icon: hugeIcon(Location01Icon) },
     favorite: { label: "favorite", Icon: <StarBorderIcon fontSize="small" /> },

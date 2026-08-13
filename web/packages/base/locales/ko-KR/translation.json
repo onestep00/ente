@@ -78,6 +78,7 @@
     "create": "만들기",
     "files_count": "파일 {{count, number}}개",
     "download": "다운로드",
+    "recreate_stream": "스트림 다시 만들기",
     "download_album": "앨범 다운로드",
     "download_favorites": "즐겨찾기 다운로드",
     "download_uncategorized": "분류되지 않은 항목 다운로드",

@@ -12,6 +12,7 @@ import {
 export type FileContextAction =
     | "sendLink"
     | "download"
+    | "recreateStream"
     | "fixTime"
     | "editLocation"
     | "favorite"
@@ -60,6 +61,8 @@ export interface FileActionContext {
      * This depends on the selection containing owned files.
      */
     showSendLink: boolean;
+    /** Whether the selected files contain an owned video that can be queued. */
+    showRecreateStream: boolean;
 }
 
 /**
@@ -78,6 +81,7 @@ export function getAvailableFileActions(
         showAddPerson,
         showEditLocation,
         showSendLink,
+        showRecreateStream,
     } = context;
 
     const actions = getBaseActions(
@@ -89,6 +93,12 @@ export function getAvailableFileActions(
 
     if (showSendLink && collectionSummary?.id !== PseudoCollectionID.trash) {
         insertSendLinkBeforeDownload(actions);
+    }
+    if (
+        showRecreateStream &&
+        collectionSummary?.id !== PseudoCollectionID.trash
+    ) {
+        insertBeforeDownload(actions, "recreateStream");
     }
 
     // Insert "addPerson" before modification actions if enabled
@@ -189,11 +199,18 @@ function getBaseActions(
  * Inserts "sendLink" before "download" if present, else prepends it.
  */
 function insertSendLinkBeforeDownload(actions: FileContextAction[]): void {
+    insertBeforeDownload(actions, "sendLink");
+}
+
+function insertBeforeDownload(
+    actions: FileContextAction[],
+    action: FileContextAction,
+): void {
     const downloadIndex = actions.indexOf("download");
     if (downloadIndex !== -1) {
-        actions.splice(downloadIndex, 0, "sendLink");
+        actions.splice(downloadIndex, 0, action);
     } else {
-        actions.unshift("sendLink");
+        actions.unshift(action);
     }
 }
 

@@ -1541,6 +1541,11 @@ const Page: React.FC = () => {
                 case "download":
                     createFileOpHandler("download", { suppressSelectionBar })();
                     break;
+                case "recreateStream":
+                    createFileOpHandler("recreateStream", {
+                        suppressSelectionBar,
+                    })();
+                    break;
                 case "favorite":
                     createFileOpHandler("favorite", { suppressSelectionBar })();
                     break;
