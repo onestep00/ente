@@ -22,6 +22,12 @@ import {
     authenticatedRequestHeaders,
     publicRequestHeaders,
 } from "../utils/http";
+import {
+    ensureJasnaWorkerReady,
+    initializeJasnaWorker,
+    isJasnaConfigured,
+    runJasnaHLSJob,
+} from "./jasna-worker-client";
 
 /* Ditto in the web app's code (used by the Wasm FFmpeg invocation). */
 const ffmpegPathPlaceholder = "FFMPEG";
@@ -41,9 +47,10 @@ const preferredHardwareEncoders = [
 const vaapiDeviceEnvVar = "ENTE_FFMPEG_VAAPI_DEVICE";
 const defaultVaapiDevice = "/dev/dri/renderD128";
 const ffmpegProgressUpdateIntervalMs = 2000;
-const hlsTargetBitrateKbps = 8000;
-const hlsMaxBitrateKbps = 12000;
-const hlsBufsizeKbps = 24000;
+const hlsTargetBitrateKbps = 15000;
+const hlsMinBitrateKbps = 10000;
+const hlsMaxBitrateKbps = 20000;
+const hlsBufsizeKbps = 40000;
 const hlsMaxFps = 60;
 const hlsGopSeconds = 2;
 
@@ -59,6 +66,7 @@ let cachedPreferredVideoEncoder: VideoEncoder | undefined;
  * @see {@link ffmpegUtilityProcessEndpoint}.
  */
 export interface FFmpegUtilityProcess {
+    jasnaIsReady: () => Promise<boolean>;
     ffmpegExec: (
         command: FFmpegCommand,
         inputFilePath: string,
@@ -92,6 +100,7 @@ process.parentPort.once("message", (e) => {
     // parent.
     expose(
         {
+            jasnaIsReady: ensureJasnaWorkerReady,
             ffmpegExec,
             ffmpegConvertToMP4,
             ffmpegGenerateHLSPlaylistAndSegments,
@@ -113,10 +122,19 @@ let _desktopAppVersion: string | undefined;
 /** Equivalent to `app.getVersion()` */
 const desktopAppVersion = () => _desktopAppVersion!;
 
-const FFmpegWorkerInitData = z.object({ appVersion: z.string() });
+const FFmpegWorkerInitData = z.object({
+    appVersion: z.string(),
+    jasnaProxyPath: z.string(),
+    jasnaRuntimeDirectory: z.string(),
+});
 
 const parseInitData = (data: unknown) => {
-    _desktopAppVersion = FFmpegWorkerInitData.parse(data).appVersion;
+    const parsed = FFmpegWorkerInitData.parse(data);
+    _desktopAppVersion = parsed.appVersion;
+    initializeJasnaWorker({
+        proxyPath: parsed.jasnaProxyPath,
+        runtimeDirectory: parsed.jasnaRuntimeDirectory,
+    });
 };
 
 /**
@@ -400,30 +418,26 @@ const execFFmpegWithProgress = async (
         if (reportProgress) reportProgress(0);
 
         let buffer = "";
-        if (child.stdout) {
-            child.stdout.setEncoding("utf8");
-            child.stdout.on("data", (chunk: string) => {
-                buffer += chunk;
-                const lines = buffer.split(/\r?\n/);
-                buffer = lines.pop() ?? "";
-                for (const rawLine of lines) {
-                    const line = rawLine.trim();
-                    if (!line || !reportProgress || !durationSeconds) continue;
-                    const outTimeSeconds = parseProgressOutTimeSeconds(line);
-                    if (outTimeSeconds !== undefined) {
-                        reportProgress(outTimeSeconds / durationSeconds);
-                        continue;
-                    }
-                    if (line.startsWith("progress=") && line.includes("end")) {
-                        reportProgress(1);
-                    }
+        child.stdout.setEncoding("utf8");
+        child.stdout.on("data", (chunk: string) => {
+            buffer += chunk;
+            const lines = buffer.split(/\r?\n/);
+            buffer = lines.pop() ?? "";
+            for (const rawLine of lines) {
+                const line = rawLine.trim();
+                if (!line || !reportProgress || !durationSeconds) continue;
+                const outTimeSeconds = parseProgressOutTimeSeconds(line);
+                if (outTimeSeconds !== undefined) {
+                    reportProgress(outTimeSeconds / durationSeconds);
+                    continue;
                 }
-            });
-        }
+                if (line.startsWith("progress=") && line.includes("end")) {
+                    reportProgress(1);
+                }
+            }
+        });
 
-        if (child.stderr) {
-            child.stderr.pipe(stderrStream);
-        }
+        child.stderr.pipe(stderrStream);
 
         child.on("error", (e: Error) => {
             stderrStream.close();
@@ -436,9 +450,7 @@ const execFFmpegWithProgress = async (
                 resolve();
             } else {
                 reject(
-                    new Error(
-                        `ffmpeg exited with code ${code ?? "unknown"}`,
-                    ),
+                    new Error(`ffmpeg exited with code ${code ?? "unknown"}`),
                 );
             }
         });
@@ -449,6 +461,7 @@ export interface FFmpegGenerateHLSPlaylistAndSegmentsResult {
     dimensions: { width: number; height: number };
     videoSize: number;
     videoObjectID: string;
+    generator: "ente-ffmpeg-v1" | "jasna-ente-v1";
 }
 
 /**
@@ -511,12 +524,11 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
         height,
         fps,
         durationSeconds,
-    } =
-        await detectVideoCharacteristics(inputFilePath);
+    } = await detectVideoCharacteristics(inputFilePath);
 
     const targetMaxDimension = 1080;
     const targetMaxFps = hlsMaxFps;
-    const targetMinBitrate = 6000 * 1000;
+    const targetMinBitrate = hlsMinBitrateKbps * 1000;
     const targetMaxBitrate = hlsMaxBitrateKbps * 1000;
 
     // If the video is smaller than 10 MB, and already H.264 (the codec we are
@@ -541,7 +553,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
     //
     // Not fully related to this case, but mentioning here as to why both the
     // size and codec need to be checked before skipping stream generation.
-    if (isH264) {
+    if (!isJasnaConfigured() && isH264) {
         const inputVideoSize = await fs
             .stat(inputFilePath)
             .then((st) => st.size);
@@ -557,9 +569,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
         !width || !height || Math.max(width, height) > targetMaxDimension;
     const clampFps = fps !== undefined && fps > targetMaxFps;
     const needsBitrateAdjust =
-        !bitrate ||
-        bitrate < targetMinBitrate ||
-        bitrate > targetMaxBitrate;
+        !bitrate || bitrate < targetMinBitrate || bitrate > targetMaxBitrate;
     const reencodeVideo =
         !isH264 ||
         !streamCopySafe ||
@@ -766,7 +776,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
     // - `-c:v h264_qsv` uses Intel Quick Sync when available.
     // - `-c:v h264_nvenc` uses NVIDIA NVENC when available.
     //
-    // - Target ~8 Mbps with a 6-12 Mbps VBV window.
+    // - VBR targets 15 Mbps within a 10-20 Mbps VBV window.
     //
     // - `-bufsize` is set to 2x maxrate for smooth rate control.
     //
@@ -786,6 +796,8 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
             "0",
             "-b:v",
             `${hlsTargetBitrateKbps}k`,
+            "-minrate",
+            `${hlsMinBitrateKbps}k`,
             "-maxrate",
             `${hlsMaxBitrateKbps}k`,
             "-bufsize",
@@ -851,7 +863,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
             playlistPath,
         ].flat();
 
-    let dimensions: { width: number; height: number };
+    let dimensions!: { width: number; height: number };
     let videoSize: number;
     let videoObjectID: string;
 
@@ -873,12 +885,25 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
             });
         };
 
-        if (reencodeVideo && preferredVideoEncoder) {
+        if (isJasnaConfigured()) {
+            if (!width || !height || !durationSeconds)
+                throw new Error("Jasna requires video dimensions and duration");
+            await runJasnaHLSJob({
+                inputPath: inputFilePath,
+                outputDir: outputPathPrefix,
+                keyInfoPath,
+                durationSeconds,
+                onProgress: (progress) =>
+                    mainProcess("ffmpegProgress", { fileID, progress }),
+            });
+            dimensions = { width, height };
+        } else if (reencodeVideo && preferredVideoEncoder) {
             try {
                 await runHlsCommand(preferredVideoEncoder);
             } catch (e) {
-                const fallbackEncoder =
-                    await resolveFallbackVideoEncoder(preferredVideoEncoder);
+                const fallbackEncoder = await resolveFallbackVideoEncoder(
+                    preferredVideoEncoder,
+                );
                 if (!fallbackEncoder) throw e;
                 log.warn(
                     `HLS generation with ${preferredVideoEncoder} failed, retrying with ${fallbackEncoder}`,
@@ -906,7 +931,9 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
 
         // Determine the dimensions of the generated video from the stderr
         // output produced by ffmpeg during the conversion.
-        dimensions = await detectVideoDimensions(stderrPath);
+        if (!isJasnaConfigured()) {
+            dimensions = await detectVideoDimensions(stderrPath);
+        }
 
         // Find the size of the generated video segments by reading the size of
         // the generated .ts file.
@@ -937,7 +964,13 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
         ]);
     }
 
-    return { playlistPath, dimensions, videoSize, videoObjectID };
+    return {
+        playlistPath,
+        dimensions,
+        videoSize,
+        videoObjectID,
+        generator: isJasnaConfigured() ? "jasna-ente-v1" : "ente-ffmpeg-v1",
+    };
 };
 
 /**
@@ -1105,9 +1138,8 @@ const detectVideoCharacteristics = async (inputFilePath: string) => {
 
     res.isH264 = videoStreamLine.startsWith("h264 ");
     if (res.isH264) {
-        const hasUnsafeProfile = /\b(?:Main|High|High 10|Main 10|Extended)\b/.test(
-            videoStreamLine,
-        );
+        const hasUnsafeProfile =
+            /\b(?:Main|High|High 10|Main 10|Extended)\b/.test(videoStreamLine);
         const hasUnsafePixelFormat = /yuv42[0-9]|yuv444|yuv420p10|10le/.test(
             videoStreamLine,
         );

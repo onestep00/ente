@@ -1,4 +1,5 @@
 const fsp = require("fs/promises");
+const { buildJasnaProxy } = require("./jasnaProxy");
 
 /**
  * This hook is invoked during the initial build (e.g. when triggered by "yarn
@@ -29,6 +30,8 @@ const fsp = require("fs/promises");
  */
 module.exports = async (context) => {
     const { appDir, platform, arch } = context;
+
+    await buildJasnaProxy(appDir, platform.nodeName, arch);
 
     // The arch used by Electron Builder is not the same as the arch used by
     // Node's process, but for the two cases that we care about, "x64" and

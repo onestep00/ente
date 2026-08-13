@@ -169,6 +169,8 @@ const GenerateHLSResult = z.object({
      * The ID of the uploaded encrypted video segment file on the remote bucket.
      */
     videoObjectID: z.string(),
+    /** Identifies the pipeline used to generate this stream. */
+    generator: z.string(),
 });
 
 export type GenerateHLSResult = z.infer<typeof GenerateHLSResult>;
@@ -177,6 +179,15 @@ const GenerateHLSProgress = z.object({
     /** Encode progress from 0 to 1. */
     progress: z.number(),
 });
+
+export const isJasnaStreamProcessingConfigured = async (electron: Electron) => {
+    void electron;
+    const res = await fetch("stream://video?op=jasna-status");
+    if (!res.ok)
+        throw new Error(`Failed to read Jasna status: HTTP ${res.status}`);
+    return z.object({ configured: z.boolean() }).parse(await res.json())
+        .configured;
+};
 
 /**
  * Initate the generation of a HLS stream, streaming the source video contents

@@ -219,7 +219,31 @@ const createFFmpegUtilityProcessEndpoint = () => {
     // process (alongwith any other init data). The utility process will reply
     // with an "ack" when it get it.
     const appVersion = app.getVersion();
-    child.postMessage(/* FFmpegWorkerInitData */ { appVersion }, [port1]);
+    const jasnaProxyPath =
+        process.env.ENTE_JASNA_FFMPEG_PROXY_PATH ??
+        (app.isPackaged
+            ? path.join(process.resourcesPath, "jasna-ffmpeg-proxy.exe")
+            : path.join(
+                  app.getAppPath(),
+                  "native",
+                  "jasna-ffmpeg-proxy",
+                  "target",
+                  "release",
+                  "ente-jasna-ffmpeg-proxy.exe",
+              ));
+    const jasnaRuntimeDirectory = path.join(
+        app.getPath("temp"),
+        "ente",
+        "jasna-runtime",
+    );
+    child.postMessage(
+        /* FFmpegWorkerInitData */ {
+            appVersion,
+            jasnaProxyPath,
+            jasnaRuntimeDirectory,
+        },
+        [port1],
+    );
 
     child.on("message", (m: unknown) => {
         if (m && typeof m == "object" && "method" in m) {

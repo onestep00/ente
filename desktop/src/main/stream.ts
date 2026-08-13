@@ -10,12 +10,15 @@ import log from "./log";
 import { ffmpegUtilityProcess } from "./services/ffmpeg";
 import { getFFmpegProgress } from "./services/ffmpeg-progress";
 import { type FFmpegGenerateHLSPlaylistAndSegmentsResult } from "./services/ffmpeg-worker";
+import {
+    acquireSeekableVideoInput,
+    type SeekableVideoInput,
+} from "./services/seekable-video-input";
 import { markClosableZip, openZip } from "./services/zip";
 import { writeStream } from "./utils/stream";
 import {
     deleteTempFile,
     deleteTempFileIgnoringErrors,
-    makeFileForStreamOrPathOrZipItem,
     makeTempFilePath,
 } from "./utils/temp";
 
@@ -80,6 +83,8 @@ const handleStreamRequest = async (request: Request): Promise<Response> => {
                         return handleGenerateHLSWrite(request, searchParams);
                     case "generate-hls-progress":
                         return handleGenerateHLSProgress(searchParams);
+                    case "jasna-status":
+                        return handleJasnaStatus();
                     default:
                         return new Response(`Unknown op ${op}`, {
                             status: 404,
@@ -98,6 +103,18 @@ const handleStreamRequest = async (request: Request): Promise<Response> => {
 
         default:
             return new Response("", { status: 404 });
+    }
+};
+
+const handleJasnaStatus = async () => {
+    try {
+        const worker = await ffmpegUtilityProcess();
+        return new Response(
+            JSON.stringify({ configured: await worker.jasnaIsReady() }),
+        );
+    } catch (e) {
+        log.error("Jasna readiness check failed", e);
+        return new Response(JSON.stringify({ configured: false }));
     }
 };
 
@@ -297,7 +314,7 @@ const handleGenerateHLSWrite = async (
     const authToken = params.get("authToken");
     if (!fileID || !fetchURL || !authToken) throw new Error("Missing params");
 
-    let inputItem: Parameters<typeof makeFileForStreamOrPathOrZipItem>[0];
+    let inputItem: SeekableVideoInput;
     const path = params.get("path");
     if (path) {
         inputItem = path;
@@ -315,19 +332,15 @@ const handleGenerateHLSWrite = async (
 
     const worker = await ffmpegUtilityProcess();
 
-    const {
-        path: inputFilePath,
-        isFileTemporary: isInputFileTemporary,
-        writeToTemporaryFile: writeToTemporaryInputFile,
-    } = await makeFileForStreamOrPathOrZipItem(inputItem);
+    const input = await acquireSeekableVideoInput(inputItem);
 
     const outputFilePathPrefix = await makeTempFilePath();
     let result: FFmpegGenerateHLSPlaylistAndSegmentsResult | undefined;
     try {
-        await writeToTemporaryInputFile();
+        await input.prepare();
 
         result = await worker.ffmpegGenerateHLSPlaylistAndSegments(
-            inputFilePath,
+            input.path,
             outputFilePathPrefix,
             fileID,
             fetchURL,
@@ -339,7 +352,13 @@ const handleGenerateHLSWrite = async (
             return new Response(null, { status: 204 });
         }
 
-        const { playlistPath, dimensions, videoSize, videoObjectID } = result;
+        const {
+            playlistPath,
+            dimensions,
+            videoSize,
+            videoObjectID,
+            generator,
+        } = result;
 
         const playlistToken = randomUUID();
         pendingVideoResults.set(playlistToken, playlistPath);
@@ -350,12 +369,12 @@ const handleGenerateHLSWrite = async (
                 dimensions,
                 videoSize,
                 videoObjectID,
+                generator,
             }),
             { status: 200 },
         );
     } finally {
-        if (isInputFileTemporary)
-            await deleteTempFileIgnoringErrors(inputFilePath);
+        await input.release();
     }
 };
 

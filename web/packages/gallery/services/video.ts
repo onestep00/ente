@@ -23,6 +23,7 @@ import { wait } from "ente-utils/promise";
 import { z } from "zod";
 import {
     initiateGenerateHLS,
+    isJasnaStreamProcessingConfigured,
     readGenerateHLSProgress,
     readVideoStream,
     videoStreamDone,
@@ -77,8 +78,9 @@ interface VideoProcessingQueueItem {
 
 const idleWaitInitial = 10 * 1000; /* 10 sec */
 const idleWaitMax = idleWaitInitial * 2 ** 6; /* 640 sec */
-const hlsTargetMinBitrate = 6000 * 1000;
-const hlsTargetMaxBitrate = 10000 * 1000;
+const hlsTargetMinBitrate = 10000 * 1000;
+const hlsTargetMaxBitrate = 20000 * 1000;
+const jasnaStreamGenerator = "jasna-ente-v1";
 const recreateStreamMinRatio = 0.5;
 const recreateSourceMinRatio = 0.8;
 const bitrateCapHeadroom = 1.3;
@@ -90,6 +92,10 @@ const progressPollIntervalMs = 2000;
  * This entire object will be reset on logout.
  */
 class VideoState {
+    /** Whether this desktop process has Jasna stream processing configured. */
+    jasnaConfigured = false;
+    /** Next index for a bounded, deterministic scan of existing previews. */
+    jasnaMigrationCursor = 0;
     /**
      * `true` if the generation of HLS streams has been enabled on this client.
      */
@@ -535,6 +541,8 @@ const PlaylistJSON = z.object({
      * segments that the playlist refers to.
      */
     size: z.number(),
+    /** The versioned pipeline which generated this stream. */
+    generator: z.string().optional(),
 });
 
 type PlaylistJSON = z.infer<typeof PlaylistJSON>;
@@ -748,6 +756,9 @@ export const videoProcessingSyncIfNeeded = async () => {
 
     if (!isHLSGenerationEnabled()) return;
 
+    _state.jasnaConfigured =
+        await isJasnaStreamProcessingConfigured(ensureElectron());
+
     await pullProcessedFileIDs();
 
     tickNow(); /* if not already ticking */
@@ -834,10 +845,7 @@ export const processVideoNewUpload = (
     }
 
     enqueueVideoProcessingItems([
-        {
-            file,
-            timestampedUploadItem: processableUploadItem,
-        },
+        { file, timestampedUploadItem: processableUploadItem },
     ]);
 };
 
@@ -854,10 +862,7 @@ export const recreateVideoStreams = (files: EnteFile[]) => {
     if (videoFiles.length === 0) return;
 
     enqueueVideoProcessingItems(
-        videoFiles.map((file) => ({
-            file,
-            forceRecreate: true,
-        })),
+        videoFiles.map((file) => ({ file, forceRecreate: true })),
     );
 };
 
@@ -973,7 +978,7 @@ const processQueue = async () => {
                 transientFailedFileIDs.add(item.file.id);
             } finally {
                 const remaining = _state.liveQueue.length + (bq?.length ?? 0);
-                _state.processingDone = (_state.processingDone ?? 0) + 1;
+                _state.processingDone += 1;
                 _state.processingTotal = _state.processingDone + remaining;
                 _state.currentFileID = undefined;
                 _state.currentProgress = undefined;
@@ -1015,13 +1020,18 @@ const shouldRecreateLowQualityStream = async (
     file: EnteFile,
     playlistFileData: EncryptedBlob,
 ) => {
+    const { type, size, generator } = await decryptPlaylistJSON(
+        playlistFileData,
+        file,
+    );
+    if (type != "hls_video") return false;
+    if (_state.jasnaConfigured && generator != jasnaStreamGenerator)
+        return true;
+
     const durationSeconds = file.metadata.duration;
     const sourceSize = file.info?.fileSize;
     if (!durationSeconds || durationSeconds <= 0) return false;
     if (!sourceSize || sourceSize <= 0) return false;
-
-    const { type, size } = await decryptPlaylistJSON(playlistFileData, file);
-    if (type != "hls_video") return false;
     if (!size || size <= 0) return false;
 
     const streamBitrate = calculateBitrate(size, durationSeconds);
@@ -1038,7 +1048,9 @@ const shouldRecreateLowQualityStream = async (
     );
     const minSourceBitrate = hlsTargetMaxBitrate * recreateSourceMinRatio;
 
-    return streamBitrate < minStreamBitrate && sourceBitrate >= minSourceBitrate;
+    return (
+        streamBitrate < minStreamBitrate && sourceBitrate >= minSourceBitrate
+    );
 };
 
 const selectLowQualityRecreateCandidates = async (
@@ -1047,16 +1059,24 @@ const selectLowQualityRecreateCandidates = async (
 ) => {
     if (maxResults <= 0 || files.length === 0) return [];
 
-    const eligible = files.filter(
-        (file) => file.metadata.duration && file.info?.fileSize,
-    );
+    const eligible = _state.jasnaConfigured
+        ? files
+        : files.filter((file) => file.metadata.duration && file.info?.fileSize);
     if (eligible.length === 0) return [];
 
-    const sampleSize = Math.min(
-        eligible.length,
-        Math.max(maxResults, maxResults * 3),
-    );
-    const sample = randomSample(eligible, sampleSize);
+    const sampleSize = Math.min(eligible.length, Math.max(50, maxResults * 5));
+    let sample: EnteFile[];
+    if (_state.jasnaConfigured) {
+        const sorted = eligible.toSorted((a, b) => a.id - b.id);
+        const start = _state.jasnaMigrationCursor % sorted.length;
+        sample = Array.from(
+            { length: sampleSize },
+            (_, offset) => sorted[(start + offset) % sorted.length]!,
+        );
+        _state.jasnaMigrationCursor = (start + sampleSize) % sorted.length;
+    } else {
+        sample = randomSample(eligible, sampleSize);
+    }
     const results = await Promise.all(
         sample.map(async (file) => {
             try {
@@ -1065,7 +1085,9 @@ const selectLowQualityRecreateCandidates = async (
                     file.id,
                 );
                 if (!playlistFileData) return undefined;
-                if (await shouldRecreateLowQualityStream(file, playlistFileData))
+                if (
+                    await shouldRecreateLowQualityStream(file, playlistFileData)
+                )
                     return file;
             } catch (e) {
                 log.warn(
@@ -1165,23 +1187,24 @@ const startHLSProgressPolling = (
     electron: ReturnType<typeof ensureElectron>,
     fileID: number,
 ) => {
-    let stopped = false;
+    const controller = new AbortController();
     let timeout: ReturnType<typeof setTimeout> | undefined;
 
     const poll = async () => {
-        if (stopped) return;
+        if (controller.signal.aborted) return;
         try {
             const progress = await readGenerateHLSProgress(electron, fileID);
-            if (!stopped && progress !== undefined) {
+            // Cleanup can abort while the awaited request is pending.
+            // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+            if (!controller.signal.aborted && progress !== undefined) {
                 updateCurrentProgress(fileID, progress);
             }
         } catch (e) {
-            log.debug(() => [
-                "gen-hls-progress",
-                { fileID, error: String(e) },
-            ]);
+            log.debug(() => ["gen-hls-progress", { fileID, error: String(e) }]);
         }
-        if (!stopped) {
+        // Cleanup can abort while the awaited request is pending.
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+        if (!controller.signal.aborted) {
             timeout = setTimeout(poll, progressPollIntervalMs);
         }
     };
@@ -1189,7 +1212,7 @@ const startHLSProgressPolling = (
     void poll();
 
     return () => {
-        stopped = true;
+        controller.abort();
         if (timeout) clearTimeout(timeout);
     };
 };
@@ -1355,7 +1378,8 @@ const processQueueItem = async ({
         return;
     }
 
-    const { playlistToken, dimensions, videoSize, videoObjectID } = res;
+    const { playlistToken, dimensions, videoSize, videoObjectID, generator } =
+        res;
     try {
         const playlist = await readVideoStream(electron, playlistToken).then(
             (res) => res.text(),
@@ -1366,6 +1390,7 @@ const processQueueItem = async ({
             playlist,
             ...dimensions,
             size: videoSize,
+            generator,
         });
 
         const encryptedPlaylist = await encryptBlob(playlistData, file.key);
