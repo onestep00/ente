@@ -47,6 +47,7 @@ import { isDev } from "./main/utils/electron";
  * The URL where the renderer HTML is being served from.
  */
 const rendererURL = "ente://app";
+const userDataPathOverrideEnvVar = "ENTE_USER_DATA_PATH";
 
 /**
  * We want to hide our window instead of closing it when the user presses the
@@ -78,6 +79,10 @@ export const allowWindowClose = (): void => {
  * We call this at the end of this file.
  */
 const main = () => {
+    const userDataPathOverride =
+        process.env[userDataPathOverrideEnvVar]?.trim();
+    if (userDataPathOverride) app.setPath("userData", userDataPathOverride);
+
     const gotTheLock = app.requestSingleInstanceLock();
     if (!gotTheLock) {
         app.quit();

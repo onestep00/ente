@@ -19,6 +19,10 @@ $env:ENTE_JASNA_PATH = "C:\path\to\jasna.exe"
 yarn dev
 ```
 
+For an isolated smoke run, set `ENTE_USER_DATA_PATH` before starting Desktop.
+Ente applies it before acquiring the single-instance lock, so Chromium state,
+keys, and local databases do not use the normal profile.
+
 Optional Jasna model and processing arguments can be supplied as a JSON string
 array. Ente adds the persistent stream, port, progress, and logging arguments.
 

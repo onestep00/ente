@@ -19,7 +19,7 @@
 - [x] Reject streaming FFmpeg calls without a matching active Ente job.
 - [x] Serialize jobs and emit structured progress and errors.
 - [x] Put the gated launcher and complete Jasna process tree in a Windows Job
-  Object with kill-on-close.
+      Object with kill-on-close.
 - [x] Record Jasna's fixed `0.0.0.0` bind and remaining status/stop exposure.
 
 ## Encoding and HLS
@@ -58,8 +58,12 @@
 - [x] Test launcher exit-code relay and blocked startup before Job assignment.
 - [x] Type-check the Desktop package.
 - [x] Build the native proxy through the Desktop build hook.
+- [x] Build the production Photos renderer and Windows x64 unpacked package.
+- [x] Run the packaged Desktop with an isolated user-data directory.
+- [x] Generate and upload encrypted HLS through the packaged stream protocol.
 - [x] Start the latest official Windows NVIDIA release and verify bundled models.
 - [x] Process two videos in one Jasna PID to verify session reuse.
+- [x] Terminate packaged Ente and verify its Jasna process tree exits.
 - [x] Test actual 24, 30, 59.94, 60, and 120 FPS inputs.
 - [x] Verify 120 FPS clamps to 60 and fractional 59.94 FPS remains fractional.
 - [x] Verify AES-encrypted HLS playback metadata with FFprobe.
