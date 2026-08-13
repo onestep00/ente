@@ -9,15 +9,31 @@ Jasna's raw-frame HLS encoder command.
 The integration was verified with the official v0.10.0 release. No Jasna source
 patch or custom Jasna build is required.
 
-## Configuration
+## Managed installation
 
-Extract the Jasna release into a writable directory with an English-only path,
-then start Ente Desktop with:
+On Windows x64, Ente installs the verified official Jasna v0.10.0 NVIDIA
+release on demand. The first stream job downloads its three release parts,
+checks their pinned sizes and SHA-256 hashes, and extracts them into:
+
+```text
+%LOCALAPPDATA%\ente\jasna\versions\v0.10.0
+```
+
+Downloads resume from `.partial` files. Extraction uses a version-specific
+staging directory and `current.json` is written only after `jasna.exe` exists.
+The 4.23 GB release archives are removed after installation. The extracted
+installation currently requires approximately 8.18 GB.
+
+`ENTE_JASNA_PATH` remains an explicit development and recovery override:
 
 ```powershell
 $env:ENTE_JASNA_PATH = "C:\path\to\jasna.exe"
 yarn dev
 ```
+
+`ENTE_JASNA_HOME` overrides the managed installation root. Ente does not query
+GitHub for the latest version at runtime: the release and hashes remain pinned
+until the integration is tested with a newer upstream version.
 
 For an isolated smoke run, set `ENTE_USER_DATA_PATH` before starting Desktop.
 Ente applies it before acquiring the single-instance lock, so Chromium state,
@@ -30,11 +46,11 @@ array. Ente adds the persistent stream, port, progress, and logging arguments.
 $env:ENTE_JASNA_ARGS_JSON = '["--device","cuda:0","--batch-size","4"]'
 ```
 
-At first use, Ente preserves Jasna's FFmpeg as `tools/ffmpeg.jasna.exe` and
-installs its proxy at `tools/ffmpeg.exe`. A small manifest records the installed
-proxy hash. If Jasna is updated in place, a changed official FFmpeg replaces the
-backup before the current Ente proxy is installed. A fresh Jasna version
-directory is handled independently.
+At first processing use, Ente preserves Jasna's FFmpeg as
+`tools/ffmpeg.jasna.exe` and installs its proxy at `tools/ffmpeg.exe`. A small
+manifest records the installed proxy hash. If Jasna is updated in place, a
+changed official FFmpeg replaces the backup before the current Ente proxy is
+installed. A fresh Jasna version directory is handled independently.
 
 ## Process and network behavior
 

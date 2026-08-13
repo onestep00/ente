@@ -6,7 +6,9 @@
 - [x] Preserve original encrypted files and file keys.
 - [x] Keep all server packages unchanged.
 - [x] Replace each generated preview only after upload succeeds.
-- [x] Keep Jasna disabled unless its executable path is configured.
+- [x] Auto-install the pinned Jasna release when the first stream job needs it.
+- [x] Resume multipart downloads and verify pinned sizes and SHA-256 hashes.
+- [x] Remove release archives after a successful managed installation.
 - [x] Use the unmodified official Jasna release.
 
 ## Jasna process architecture

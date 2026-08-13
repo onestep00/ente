@@ -23,7 +23,6 @@ import {
     publicRequestHeaders,
 } from "../utils/http";
 import {
-    ensureJasnaWorkerReady,
     initializeJasnaWorker,
     isJasnaConfigured,
     runJasnaHLSJob,
@@ -66,7 +65,7 @@ let cachedPreferredVideoEncoder: VideoEncoder | undefined;
  * @see {@link ffmpegUtilityProcessEndpoint}.
  */
 export interface FFmpegUtilityProcess {
-    jasnaIsReady: () => Promise<boolean>;
+    jasnaIsConfigured: () => Promise<boolean>;
     ffmpegExec: (
         command: FFmpegCommand,
         inputFilePath: string,
@@ -100,7 +99,7 @@ process.parentPort.once("message", (e) => {
     // parent.
     expose(
         {
-            jasnaIsReady: ensureJasnaWorkerReady,
+            jasnaIsConfigured: () => Promise.resolve(isJasnaConfigured()),
             ffmpegExec,
             ffmpegConvertToMP4,
             ffmpegGenerateHLSPlaylistAndSegments,
@@ -126,6 +125,8 @@ const FFmpegWorkerInitData = z.object({
     appVersion: z.string(),
     jasnaProxyPath: z.string(),
     jasnaRuntimeDirectory: z.string(),
+    jasnaExtractorPath: z.string(),
+    jasnaInstallDirectory: z.string(),
 });
 
 const parseInitData = (data: unknown) => {
@@ -134,6 +135,8 @@ const parseInitData = (data: unknown) => {
     initializeJasnaWorker({
         proxyPath: parsed.jasnaProxyPath,
         runtimeDirectory: parsed.jasnaRuntimeDirectory,
+        extractorPath: parsed.jasnaExtractorPath,
+        installDirectory: parsed.jasnaInstallDirectory,
     });
 };
 

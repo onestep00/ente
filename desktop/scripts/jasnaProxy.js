@@ -7,8 +7,10 @@ const execFileAsync = promisify(execFile);
 
 const buildJasnaProxy = async (appDir, platform, arch) => {
     const output = path.join(appDir, "build", "jasna-ffmpeg-proxy.exe");
+    const extractorOutput = path.join(appDir, "build", "jasna-7za.exe");
     if (platform != "win32" || arch != "x64") {
         await fs.rm(output, { force: true });
+        await fs.rm(extractorOutput, { force: true });
         return;
     }
     const manifest = path.join(
@@ -34,6 +36,10 @@ const buildJasnaProxy = async (appDir, platform, arch) => {
             "ente-jasna-ffmpeg-proxy.exe",
         ),
         output,
+    );
+    await fs.copyFile(
+        require.resolve("7zip-bin/win/x64/7za.exe"),
+        extractorOutput,
     );
 };
 

@@ -1,9 +1,17 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import {
+    execFile,
+    spawn,
+    type ChildProcessWithoutNullStreams,
+} from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import readline from "node:readline";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { promisify } from "node:util";
 import log from "../log-worker";
 
 const jasnaPathEnvVar = "ENTE_JASNA_PATH";
@@ -14,6 +22,14 @@ const statusPollIntervalMs = 500;
 interface JasnaWorkerPaths {
     proxyPath: string;
     runtimeDirectory: string;
+    extractorPath: string;
+    installDirectory: string;
+}
+
+interface JasnaInstallManifest {
+    version: 1;
+    release: string;
+    executable: string;
 }
 
 interface JasnaJobStatus {
@@ -43,15 +59,266 @@ let workerPort: number | undefined;
 let readyPromise: Promise<void> | undefined;
 let startingPromise: Promise<void> | undefined;
 let jobTail = Promise.resolve();
+let installPromise: Promise<string> | undefined;
+let resolvedExecutable: string | undefined;
+let installRetryAfter = 0;
+let lastInstallError: Error | undefined;
+
+const execFileAsync = promisify(execFile);
+const managedRelease = "v0.10.0";
+const managedAssets = [
+    {
+        name: "jasna-windows-0.10.0.7z.001",
+        size: 2_097_152_000,
+        sha256: "e21e16e9d4b094f4d2a315ed5a1ed9314914e01b7e772e4b511c4e3fccaa44c5",
+    },
+    {
+        name: "jasna-windows-0.10.0.7z.002",
+        size: 2_097_152_000,
+        sha256: "741d6929b490adebdc73b53b4dc98aabbbfff355cfd3295918052143b90d1045",
+    },
+    {
+        name: "jasna-windows-0.10.0.7z.003",
+        size: 36_698_772,
+        sha256: "5d3cada0ca552393de0c44de7c65006d50b2b9f74d2ca43061808bc1245cd266",
+    },
+] as const;
+const managedReleaseURL = `https://github.com/Kruk2/jasna/releases/download/${managedRelease}`;
+const managedInstalledSize = 8_778_018_427;
 
 export const initializeJasnaWorker = (paths: JasnaWorkerPaths) => {
     workerPaths = paths;
 };
 
 export const isJasnaConfigured = () =>
-    process.platform == "win32" &&
-    process.arch == "x64" &&
-    Boolean(process.env[jasnaPathEnvVar]?.trim());
+    process.platform == "win32" && process.arch == "x64";
+
+const managedManifestPath = () =>
+    path.join(workerPaths!.installDirectory, "current.json");
+
+const readManagedManifest = async () => {
+    try {
+        return JSON.parse(
+            await fs.readFile(managedManifestPath(), "utf8"),
+        ) as JasnaInstallManifest;
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code == "ENOENT") return undefined;
+        if (error instanceof SyntaxError) {
+            log.warn("Ignoring an invalid managed Jasna manifest", error);
+            return undefined;
+        }
+        throw error;
+    }
+};
+
+const existingManagedExecutable = async () => {
+    const manifest = await readManagedManifest();
+    if (manifest?.version != 1 || manifest.release != managedRelease)
+        return undefined;
+    const executable = path.resolve(
+        workerPaths!.installDirectory,
+        manifest.executable,
+    );
+    const installPrefix = `${path.resolve(workerPaths!.installDirectory)}${path.sep}`;
+    if (!executable.startsWith(installPrefix)) return undefined;
+    try {
+        await fs.access(executable);
+        return executable;
+    } catch {
+        return undefined;
+    }
+};
+
+const downloadAsset = async (
+    destination: string,
+    asset: (typeof managedAssets)[number],
+) => {
+    const partial = `${destination}.partial`;
+    let offset = 0;
+    try {
+        offset = (await fs.stat(partial)).size;
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code != "ENOENT") throw error;
+    }
+    if (offset > asset.size) {
+        await fs.rm(partial, { force: true });
+        offset = 0;
+    }
+    if (offset == asset.size) {
+        if ((await fileHash(partial)) == asset.sha256) {
+            await fs.rename(partial, destination);
+            return;
+        }
+        await fs.rm(partial, { force: true });
+        offset = 0;
+    }
+    log.info(`Downloading managed Jasna asset ${asset.name}`);
+    const response = await fetch(`${managedReleaseURL}/${asset.name}`, {
+        ...(offset ? { headers: { Range: `bytes=${offset}-` } } : {}),
+        redirect: "follow",
+    });
+    if (!response.ok || !response.body)
+        throw new Error(`Jasna download failed: HTTP ${response.status}`);
+    if (offset && response.status != 206) {
+        await fs.rm(partial, { force: true });
+        return downloadAsset(destination, asset);
+    }
+    if (offset) {
+        const contentRange = response.headers.get("content-range");
+        if (!contentRange?.startsWith(`bytes ${offset}-`))
+            throw new Error(`Invalid resume response for ${asset.name}`);
+    }
+    await pipeline(
+        Readable.from(response.body as unknown as AsyncIterable<Uint8Array>),
+        createWriteStream(partial, { flags: offset ? "a" : "w" }),
+    );
+    const stat = await fs.stat(partial);
+    if (stat.size != asset.size)
+        throw new Error(
+            `Unexpected size for ${asset.name}: ${stat.size}/${asset.size}`,
+        );
+    if ((await fileHash(partial)) != asset.sha256)
+        throw new Error(`Checksum mismatch for ${asset.name}`);
+    await fs.rename(partial, destination);
+    log.info(`Downloaded and verified managed Jasna asset ${asset.name}`);
+};
+
+const installManagedRelease = async () => {
+    const paths = workerPaths;
+    if (!paths) throw new Error("Jasna worker was not initialized");
+    const downloadDirectory = path.join(paths.installDirectory, "downloads");
+    const versionsDirectory = path.join(paths.installDirectory, "versions");
+    const finalDirectory = path.join(versionsDirectory, managedRelease);
+    const stagingDirectory = path.join(
+        versionsDirectory,
+        `${managedRelease}.installing-${randomUUID()}`,
+    );
+    await Promise.all([
+        fs.mkdir(downloadDirectory, { recursive: true }),
+        fs.mkdir(versionsDirectory, { recursive: true }),
+        fs.access(paths.extractorPath),
+    ]);
+    const fileSystem = await fs.statfs(paths.installDirectory);
+    const availableBytes = fileSystem.bavail * fileSystem.bsize;
+    let downloadedBytes = 0;
+    for (const asset of managedAssets) {
+        for (const candidate of [
+            path.join(downloadDirectory, asset.name),
+            path.join(downloadDirectory, `${asset.name}.partial`),
+        ]) {
+            try {
+                downloadedBytes += Math.min(
+                    (await fs.stat(candidate)).size,
+                    asset.size,
+                );
+                break;
+            } catch (error) {
+                if ((error as NodeJS.ErrnoException).code != "ENOENT")
+                    throw error;
+            }
+        }
+    }
+    const downloadSize = managedAssets.reduce(
+        (sum, asset) => sum + asset.size,
+        0,
+    );
+    const requiredBytes =
+        managedInstalledSize +
+        downloadSize -
+        downloadedBytes +
+        512 * 1024 * 1024;
+    if (availableBytes < requiredBytes)
+        throw new Error(
+            `Not enough disk space to install Jasna: ${availableBytes}/${requiredBytes}`,
+        );
+    log.info(`Installing managed Jasna ${managedRelease}`);
+    for (const asset of managedAssets) {
+        const destination = path.join(downloadDirectory, asset.name);
+        let valid = false;
+        try {
+            const stat = await fs.stat(destination);
+            valid =
+                stat.size == asset.size &&
+                (await fileHash(destination)) == asset.sha256;
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code != "ENOENT") throw error;
+        }
+        if (!valid) {
+            await fs.rm(destination, { force: true });
+            await downloadAsset(destination, asset);
+        }
+    }
+    await fs.mkdir(stagingDirectory, { recursive: true });
+    try {
+        await execFileAsync(paths.extractorPath, [
+            "x",
+            path.join(downloadDirectory, managedAssets[0].name),
+            `-o${stagingDirectory}`,
+            "-y",
+        ]);
+        const executable = path.join(stagingDirectory, "jasna.exe");
+        await fs.access(executable);
+        const replacedDirectory = `${finalDirectory}.replaced-${randomUUID()}`;
+        let replacedExisting = false;
+        try {
+            await fs.rename(finalDirectory, replacedDirectory);
+            replacedExisting = true;
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code != "ENOENT") throw error;
+        }
+        try {
+            await fs.rename(stagingDirectory, finalDirectory);
+        } catch (error) {
+            if (replacedExisting)
+                await fs.rename(replacedDirectory, finalDirectory);
+            throw error;
+        }
+        await writeJSONAtomically(managedManifestPath(), {
+            version: 1,
+            release: managedRelease,
+            executable: path.relative(
+                paths.installDirectory,
+                path.join(finalDirectory, "jasna.exe"),
+            ),
+        } satisfies JasnaInstallManifest);
+        if (replacedExisting)
+            await fs.rm(replacedDirectory, { recursive: true, force: true });
+        await fs.rm(downloadDirectory, { recursive: true, force: true });
+        log.info(`Installed managed Jasna ${managedRelease}`);
+        return path.join(finalDirectory, "jasna.exe");
+    } catch (error) {
+        await fs.rm(stagingDirectory, { recursive: true, force: true });
+        throw error;
+    }
+};
+
+const resolveExecutable = async () => {
+    if (resolvedExecutable) return resolvedExecutable;
+    const override = process.env[jasnaPathEnvVar]?.trim();
+    if (override) {
+        await fs.access(override);
+        return (resolvedExecutable = override);
+    }
+    const existing = await existingManagedExecutable();
+    if (existing) return (resolvedExecutable = existing);
+    if (lastInstallError && Date.now() < installRetryAfter)
+        throw lastInstallError;
+    installPromise ??= installManagedRelease()
+        .catch((error: unknown) => {
+            const installError =
+                error instanceof Error ? error : new Error(String(error));
+            lastInstallError = installError;
+            installRetryAfter = Date.now() + 60 * 1000;
+            throw installError;
+        })
+        .finally(() => {
+            installPromise = undefined;
+        });
+    resolvedExecutable = await installPromise;
+    lastInstallError = undefined;
+    installRetryAfter = 0;
+    return resolvedExecutable;
+};
 
 const configuredArgs = () => {
     const raw = process.env[jasnaArgsEnvVar]?.trim();
@@ -151,8 +418,14 @@ const reservePort = () =>
 
 const startWorkerOnce = async () => {
     if (child && readyPromise) return readyPromise;
-    const executable = process.env[jasnaPathEnvVar]?.trim();
-    if (!executable) throw new Error(`${jasnaPathEnvVar} is not configured`);
+    let executable: string;
+    try {
+        executable = await resolveExecutable();
+    } catch (error) {
+        throw new Error(`ENTE_JASNA_UNAVAILABLE: ${String(error)}`, {
+            cause: error,
+        });
+    }
     const { jobPath, realFFmpegPath } = await installProxy(executable);
     const port = await reservePort();
     const worker = spawn(
@@ -237,19 +510,20 @@ const waitUntilReady = async (port: number) => {
     throw new Error("Timed out waiting for Jasna to start");
 };
 
-export const ensureJasnaWorkerReady = async () => {
-    if (!isJasnaConfigured()) return false;
-    await startWorker();
-    return true;
-};
-
 export const runJasnaHLSJob = async (job: JasnaJob) => {
     const previous = jobTail;
     let release!: () => void;
     jobTail = new Promise<void>((resolve) => (release = resolve));
     await previous;
     try {
-        await startWorker();
+        try {
+            await startWorker();
+        } catch (error) {
+            if (String(error).includes("ENTE_JASNA_UNAVAILABLE")) throw error;
+            throw new Error(`ENTE_JASNA_UNAVAILABLE: ${String(error)}`, {
+                cause: error,
+            });
+        }
         const port = workerPort;
         const runtimeDirectory = workerPaths?.runtimeDirectory;
         if (!port || !runtimeDirectory) throw new Error("Jasna did not start");

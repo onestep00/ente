@@ -110,7 +110,7 @@ const handleJasnaStatus = async () => {
     try {
         const worker = await ffmpegUtilityProcess();
         return new Response(
-            JSON.stringify({ configured: await worker.jasnaIsReady() }),
+            JSON.stringify({ configured: await worker.jasnaIsConfigured() }),
         );
     } catch (e) {
         log.error("Jasna readiness check failed", e);
@@ -339,13 +339,19 @@ const handleGenerateHLSWrite = async (
     try {
         await input.prepare();
 
-        result = await worker.ffmpegGenerateHLSPlaylistAndSegments(
-            input.path,
-            outputFilePathPrefix,
-            fileID,
-            fetchURL,
-            authToken,
-        );
+        try {
+            result = await worker.ffmpegGenerateHLSPlaylistAndSegments(
+                input.path,
+                outputFilePathPrefix,
+                fileID,
+                fetchURL,
+                authToken,
+            );
+        } catch (error) {
+            if (String(error).includes("ENTE_JASNA_UNAVAILABLE"))
+                return new Response(String(error), { status: 503 });
+            throw error;
+        }
 
         if (!result) {
             // This video doesn't require stream generation.

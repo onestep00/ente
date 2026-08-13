@@ -24,6 +24,7 @@ import { z } from "zod";
 import {
     initiateGenerateHLS,
     isJasnaStreamProcessingConfigured,
+    JasnaUnavailableError,
     readGenerateHLSProgress,
     readVideoStream,
     videoStreamDone,
@@ -1364,7 +1365,8 @@ const processQueueItem = async ({
         // The native side code already retries failures for case 2 (except HTTP
         // 4xx errors). Thus, usually we should come here only for case 1, and
         // retrying the same video again will not work either.
-        await markFailedVideoFile(file);
+        if (!(e instanceof JasnaUnavailableError))
+            await markFailedVideoFile(file);
         throw e;
     } finally {
         stopProgressPolling();

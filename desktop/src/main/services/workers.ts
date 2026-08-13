@@ -236,11 +236,23 @@ const createFFmpegUtilityProcessEndpoint = () => {
         "ente",
         "jasna-runtime",
     );
+    const jasnaExtractorPath = app.isPackaged
+        ? path.join(process.resourcesPath, "jasna-7za.exe")
+        : require.resolve("7zip-bin/win/x64/7za.exe");
+    const jasnaInstallDirectory =
+        process.env.ENTE_JASNA_HOME ??
+        path.join(
+            process.env.LOCALAPPDATA ?? app.getPath("userData"),
+            "ente",
+            "jasna",
+        );
     child.postMessage(
         /* FFmpegWorkerInitData */ {
             appVersion,
             jasnaProxyPath,
             jasnaRuntimeDirectory,
+            jasnaExtractorPath,
+            jasnaInstallDirectory,
         },
         [port1],
     );
