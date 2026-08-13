@@ -20,6 +20,12 @@ This page helps you solve common issues with Ente Photos. Jump to the section th
 
 If large video files (300-700+ MB) are failing to upload or getting stuck, try these solutions:
 
+On Android, large files use resumable 20 MB multipart uploads. Each part is
+retried for transient network and server failures, and unfinished uploads are
+resumed by later foreground or background sync runs. Android may still stop a
+background task because of system battery or process limits; the next sync run
+continues from the last completed part.
+
 **Solution 1: Disable machine learning temporarily**
 
 ML processing can cause crashes during large video uploads, especially on mobile devices:

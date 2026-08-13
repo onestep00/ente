@@ -320,9 +320,10 @@ class UploadLocksDB {
       _partsTable.table,
       where: '${_partsTable.columnObjectKey} = ?',
       whereArgs: [objectKey],
+      orderBy: '${_partsTable.columnPartNumber} ASC',
     );
 
-    final List<bool> partUploadStatus = [];
+    final List<bool> partUploadStatus = List.filled(partsStatus.length, false);
     final List<String> partsURLs = List.generate(
       partsStatus.length,
       (index) => "",
@@ -337,7 +338,7 @@ class UploadLocksDB {
       if (part[_partsTable.columnPartETag] != null) {
         partETags[partNumber] = part[_partsTable.columnPartETag] as String;
       }
-      partUploadStatus.add(partStatus == "uploaded");
+      partUploadStatus[partNumber] = partStatus == "uploaded";
     }
     final urls = MultipartUploadURLs(
       objectKey: objectKey,

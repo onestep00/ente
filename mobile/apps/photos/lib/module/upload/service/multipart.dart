@@ -1,4 +1,5 @@
 import "dart:io";
+import "dart:math" as math;
 
 import "package:dio/dio.dart";
 import "package:ente_crypto/ente_crypto.dart";
@@ -17,9 +18,13 @@ import "package:photos/service_locator.dart";
 import "package:photos/services/collections_service.dart";
 
 class MultiPartUploader {
+  static const int _maximumPartUploadAttempts = 4;
+  static const Duration _defaultPartRetryDelay = Duration(seconds: 2);
+
   final Dio _s3Dio;
   final UploadLocksDB _db;
   final FlagService _featureFlagService;
+  final Duration _partRetryDelay;
   late final Logger _logger = Logger("MultiPartUploader");
   FileUploadGateway get _gateway => fileUploadGateway;
 
@@ -27,8 +32,9 @@ class MultiPartUploader {
     Dio _, // unused, kept for backwards compatibility
     this._s3Dio,
     this._db,
-    this._featureFlagService,
-  );
+    this._featureFlagService, {
+    Duration partRetryDelay = _defaultPartRetryDelay,
+  }) : _partRetryDelay = partRetryDelay;
 
   Future<FileEncryptResult> getEncryptionResult(
     String localId,
@@ -189,7 +195,7 @@ class MultiPartUploader {
       try {
         etags = await _uploadParts(multipartInfo, encryptedFile);
       } on DioException catch (e) {
-        if (e.response?.statusCode == 404) {
+        if (e.response?.statusCode == 404 || e.response?.statusCode == 403) {
           _logger.severe(
             "Multipart upload not found for key ${multipartInfo.urls.objectKey}",
           );
@@ -214,7 +220,7 @@ class MultiPartUploader {
           multipartInfo.urls.completeURL,
         );
       } on DioException catch (e) {
-        if (e.response?.statusCode == 404) {
+        if (e.response?.statusCode == 404 || e.response?.statusCode == 403) {
           _logger.severe(
             "Multipart upload not found for key ${multipartInfo.urls.objectKey}",
           );
@@ -299,7 +305,7 @@ class MultiPartUploader {
       count++;
       final partURL = partsURLs[i];
       final isLastPart = i == partsLength - 1;
-      final fileSize = isLastPart ? encFileLength % partSize : partSize;
+      final fileSize = math.min(partSize, encFileLength - (i * partSize));
       _logger.info(
         "Uploading part ${i + 1} / $partsLength of size $fileSize bytes (total size $encFileLength). ObjectKey=${partInfo.urls.objectKey}",
       );
@@ -325,26 +331,20 @@ class MultiPartUploader {
       }
 
       try {
-        final response = await _s3Dio.put(
-          useUploadProxy ? "$kUploadProxyEndpoint/multipart-upload" : partURL,
-          data: encryptedFile.openRead(
-            i * partSize,
-            isLastPart ? null : (i + 1) * partSize,
-          ),
-          options: Options(
-            headers: headers,
-          ),
+        final eTag = await _uploadPartWithRetry(
+          url: useUploadProxy
+              ? "$kUploadProxyEndpoint/multipart-upload"
+              : partURL,
+          encryptedFile: encryptedFile,
+          start: i * partSize,
+          end: isLastPart ? null : (i + 1) * partSize,
+          headers: headers,
+          useUploadProxy: useUploadProxy,
+          partNumber: i + 1,
+          partsLength: partsLength,
         );
 
-        final eTag = useUploadProxy
-            ? _extractProxyETag(response.data)
-            : response.headers.value("etag");
-
-        if (eTag?.isEmpty ?? true) {
-          throw Exception('ETAG_MISSING');
-        }
-
-        etags[i] = eTag!;
+        etags[i] = eTag;
 
         await _db.updatePartStatus(partInfo.urls.objectKey, i, eTag);
         i++;
@@ -371,6 +371,84 @@ class MultiPartUploader {
     );
 
     return etags;
+  }
+
+  Future<String> _uploadPartWithRetry({
+    required String url,
+    required File encryptedFile,
+    required int start,
+    required int? end,
+    required Map<String, dynamic> headers,
+    required bool useUploadProxy,
+    required int partNumber,
+    required int partsLength,
+    int attempt = 1,
+  }) async {
+    int bytesSent = 0;
+    try {
+      final response = await _s3Dio.put(
+        url,
+        data: encryptedFile.openRead(start, end),
+        options: Options(headers: headers),
+        onSendProgress: (sent, _) => bytesSent = sent,
+      );
+      final eTag = useUploadProxy
+          ? _extractProxyETag(response.data)
+          : response.headers.value("etag");
+      if (eTag?.isEmpty ?? true) {
+        throw const _MissingPartETagError();
+      }
+      return eTag!;
+    } catch (e) {
+      if (attempt >= _maximumPartUploadAttempts || !_shouldRetryPartUpload(e)) {
+        rethrow;
+      }
+
+      final delay = _partRetryDelay * (1 << (attempt - 1));
+      final errorSummary = e is DioException
+          ? "${e.type.name}, status=${e.response?.statusCode}"
+          : e.runtimeType.toString();
+      _logger.warning(
+        "Part $partNumber / $partsLength upload failed after $bytesSent bytes. "
+        "Retrying attempt ${attempt + 1} in ${delay.inSeconds}s "
+        "($errorSummary)",
+      );
+      await Future.delayed(delay);
+      return _uploadPartWithRetry(
+        url: url,
+        encryptedFile: encryptedFile,
+        start: start,
+        end: end,
+        headers: headers,
+        useUploadProxy: useUploadProxy,
+        partNumber: partNumber,
+        partsLength: partsLength,
+        attempt: attempt + 1,
+      );
+    }
+  }
+
+  bool _shouldRetryPartUpload(Object error) {
+    if (error is _MissingPartETagError) return true;
+    if (error is! DioException) return false;
+
+    switch (error.type) {
+      case DioExceptionType.connectionTimeout:
+      case DioExceptionType.sendTimeout:
+      case DioExceptionType.receiveTimeout:
+      case DioExceptionType.connectionError:
+      case DioExceptionType.unknown:
+        return true;
+      case DioExceptionType.badResponse:
+        final statusCode = error.response?.statusCode;
+        return statusCode == 408 ||
+            statusCode == 425 ||
+            statusCode == 429 ||
+            (statusCode != null && statusCode >= 500);
+      case DioExceptionType.cancel:
+      case DioExceptionType.badCertificate:
+        return false;
+    }
   }
 
   Future<void> _completeMultipartUpload(
@@ -420,4 +498,11 @@ class MultiPartUploader {
     }
     return null;
   }
+}
+
+class _MissingPartETagError implements Exception {
+  const _MissingPartETagError();
+
+  @override
+  String toString() => "Multipart response did not contain an ETag";
 }

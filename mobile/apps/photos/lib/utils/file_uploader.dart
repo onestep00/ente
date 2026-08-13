@@ -51,12 +51,12 @@ import "package:uuid/uuid.dart";
 
 class FileUploader {
   static const kMaximumConcurrentUploads = 4;
-  static const kMaximumConcurrentVideoUploads = 2;
+  static const kMaximumConcurrentVideoUploads = 1;
   static const kMaximumThumbnailCompressionAttempts = 2;
   static const kMaximumUploadAttempts = 4;
   static const kMaxFileSize10Gib = 10737418240;
   static const kBlockedUploadsPollFrequency = Duration(seconds: 2);
-  static const kFileUploadTimeout = Duration(minutes: 50);
+  static const kFileUploadTimeout = Duration(hours: 24);
   static const k20MBStorageBuffer = 20 * 1024 * 1024;
   static const _lastStaleFileCleanupTime = "lastStaleFileCleanupTime";
 
