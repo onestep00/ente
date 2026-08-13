@@ -464,7 +464,7 @@ export interface FFmpegGenerateHLSPlaylistAndSegmentsResult {
     dimensions: { width: number; height: number };
     videoSize: number;
     videoObjectID: string;
-    generator: "ente-ffmpeg-v1" | "jasna-ente-v1";
+    generator: "ente-ffmpeg-v1" | "jasna-ente-v2";
 }
 
 /**
@@ -972,7 +972,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
         dimensions,
         videoSize,
         videoObjectID,
-        generator: isJasnaConfigured() ? "jasna-ente-v1" : "ente-ffmpeg-v1",
+        generator: isJasnaConfigured() ? "jasna-ente-v2" : "ente-ffmpeg-v1",
     };
 };
 

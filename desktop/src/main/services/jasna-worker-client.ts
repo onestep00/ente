@@ -19,6 +19,22 @@ const jasnaArgsEnvVar = "ENTE_JASNA_ARGS_JSON";
 const startupTimeoutMs = 60 * 60 * 1000;
 const statusPollIntervalMs = 500;
 
+const managedJasnaArgs = [
+    "--batch-size",
+    "4",
+    "--max-clip-size",
+    "360",
+    "--temporal-overlap",
+    "15",
+    "--fp16",
+    "--compile-basicvsrpp",
+    "--enable-crossfade",
+    "--detection-model",
+    "rfdetr-v6-large",
+    "--secondary-restoration",
+    "unet-4x",
+] as const;
+
 interface JasnaWorkerPaths {
     proxyPath: string;
     runtimeDirectory: string;
@@ -53,6 +69,13 @@ interface ProxyInstallManifest {
     installedProxyHash: string;
 }
 
+interface ManagedAsset {
+    name: string;
+    size: number;
+    sha256: string;
+    downloadURL?: string;
+}
+
 let workerPaths: JasnaWorkerPaths | undefined;
 let child: ChildProcessWithoutNullStreams | undefined;
 let workerPort: number | undefined;
@@ -82,9 +105,16 @@ const managedAssets = [
         size: 36_698_772,
         sha256: "5d3cada0ca552393de0c44de7c65006d50b2b9f74d2ca43061808bc1245cd266",
     },
-] as const;
+] as const satisfies readonly ManagedAsset[];
 const managedReleaseURL = `https://github.com/Kruk2/jasna/releases/download/${managedRelease}`;
 const managedInstalledSize = 8_778_018_427;
+const managedDetectionModel: ManagedAsset = {
+    name: "rfdetr-v6-large.onnx",
+    size: 149_272_820,
+    sha256: "e8c1af4b1d7be2b99ef21325a8140b7bea15132df0b25cd30d32128bcd8cd644",
+    downloadURL:
+        "https://github.com/Kruk2/jasna/releases/download/0.1/rfdetr-v6-large.onnx",
+};
 
 export const initializeJasnaWorker = (paths: JasnaWorkerPaths) => {
     workerPaths = paths;
@@ -129,10 +159,7 @@ const existingManagedExecutable = async () => {
     }
 };
 
-const downloadAsset = async (
-    destination: string,
-    asset: (typeof managedAssets)[number],
-) => {
+const downloadAsset = async (destination: string, asset: ManagedAsset) => {
     const partial = `${destination}.partial`;
     let offset = 0;
     try {
@@ -153,10 +180,13 @@ const downloadAsset = async (
         offset = 0;
     }
     log.info(`Downloading managed Jasna asset ${asset.name}`);
-    const response = await fetch(`${managedReleaseURL}/${asset.name}`, {
-        ...(offset ? { headers: { Range: `bytes=${offset}-` } } : {}),
-        redirect: "follow",
-    });
+    const response = await fetch(
+        asset.downloadURL ?? `${managedReleaseURL}/${asset.name}`,
+        {
+            ...(offset ? { headers: { Range: `bytes=${offset}-` } } : {}),
+            redirect: "follow",
+        },
+    );
     if (!response.ok || !response.body)
         throw new Error(`Jasna download failed: HTTP ${response.status}`);
     if (offset && response.status != 206) {
@@ -181,6 +211,27 @@ const downloadAsset = async (
         throw new Error(`Checksum mismatch for ${asset.name}`);
     await fs.rename(partial, destination);
     log.info(`Downloaded and verified managed Jasna asset ${asset.name}`);
+};
+
+const ensureManagedDetectionModel = async (jasnaPath: string) => {
+    const weightsDirectory = path.join(
+        path.dirname(jasnaPath),
+        "model_weights",
+    );
+    const destination = path.join(weightsDirectory, managedDetectionModel.name);
+    await fs.mkdir(weightsDirectory, { recursive: true });
+    let valid = false;
+    try {
+        const stat = await fs.stat(destination);
+        valid =
+            stat.size == managedDetectionModel.size &&
+            (await fileHash(destination)) == managedDetectionModel.sha256;
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code != "ENOENT") throw error;
+    }
+    if (valid) return;
+    await fs.rm(destination, { force: true });
+    await downloadAsset(destination, managedDetectionModel);
 };
 
 const installManagedRelease = async () => {
@@ -322,7 +373,7 @@ const resolveExecutable = async () => {
 
 const configuredArgs = () => {
     const raw = process.env[jasnaArgsEnvVar]?.trim();
-    if (!raw) return [];
+    if (!raw) return [...managedJasnaArgs];
     const parsed: unknown = JSON.parse(raw);
     if (
         !Array.isArray(parsed) ||
@@ -340,7 +391,7 @@ const configuredArgs = () => {
     const conflict = parsed.find((arg) => enteOwned.has(arg));
     if (conflict)
         throw new Error(`${jasnaArgsEnvVar} cannot override ${conflict}`);
-    return parsed;
+    return [...managedJasnaArgs, ...parsed];
 };
 
 const installProxy = async (jasnaPath: string) => {
@@ -426,6 +477,7 @@ const startWorkerOnce = async () => {
             cause: error,
         });
     }
+    await ensureManagedDetectionModel(executable);
     const { jobPath, realFFmpegPath } = await installProxy(executable);
     const port = await reservePort();
     const worker = spawn(
