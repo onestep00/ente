@@ -2091,6 +2091,7 @@ export const FileViewer: React.FC<FileViewerProps> = ({
                 onClose={handleFileInfoClose}
                 file={activeAnnotatedFile.file}
                 exif={activeFileExif}
+                streamGenerator={activeAnnotatedFile.itemData.streamGenerator}
                 allowEdits={!!activeAnnotatedFile.annotation.isOwnFile}
                 allowMap={haveUser}
                 showCollections={haveUser && !isInHiddenSection}

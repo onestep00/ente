@@ -121,6 +121,12 @@ export type FileInfoProps = ModalVisibilityProps & {
      */
     exif: FileInfoExif | undefined;
     /**
+     * The versioned pipeline that generated the file's stream. `null` denotes
+     * an existing stream without generator metadata; `undefined` means there
+     * is no stream to describe.
+     */
+    streamGenerator?: string | null;
+    /**
      * If set, then controls to edit the file's metadata (name, date, caption)
      * will be shown.
      */
@@ -190,6 +196,7 @@ export const FileInfo: React.FC<FileInfoProps> = ({
     onClose,
     file,
     exif,
+    streamGenerator,
     allowEdits,
     allowMap,
     showCollections,
@@ -329,6 +336,21 @@ export const FileInfo: React.FC<FileInfoProps> = ({
                         onFileMetadataUpdate,
                     }}
                 />
+                {streamGenerator !== undefined && (
+                    <InfoItem
+                        icon={<VideocamOutlinedIcon />}
+                        title={t("stream_generator")}
+                        caption={streamGenerator ?? t("unversioned")}
+                        trailingButton={
+                            streamGenerator && (
+                                <CopyButton
+                                    size="medium"
+                                    text={streamGenerator}
+                                />
+                            )
+                        }
+                    />
+                )}
 
                 {annotatedExif?.takenOnDevice && (
                     <InfoItem

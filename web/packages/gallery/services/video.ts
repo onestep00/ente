@@ -342,6 +342,8 @@ export interface HLSPlaylistData {
     width: number;
     /** The height of the video (px). */
     height: number;
+    /** The versioned pipeline that generated the stream, if recorded. */
+    generator?: string;
 }
 
 /**
@@ -425,6 +427,7 @@ export const hlsPlaylistDataForFile = async (
         playlist: playlistTemplate,
         width,
         height,
+        generator,
     } = await decryptPlaylistJSON(playlistFileData, file);
 
     // A playlist format the current client does not understand.
@@ -514,7 +517,7 @@ export const hlsPlaylistDataForFile = async (
         new Blob([playlist], { type: "application/vnd.apple.mpegurl" }),
     );
 
-    return { playlistURL, width, height };
+    return { playlistURL, width, height, generator };
 };
 
 const PlaylistJSON = z.object({

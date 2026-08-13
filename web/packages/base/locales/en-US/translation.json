@@ -360,6 +360,8 @@
     "enable_map": "Enable map",
     "disable_map": "Disable map",
     "details": "Details",
+    "stream_generator": "Stream generator",
+    "unversioned": "Unversioned",
     "view_exif": "View all Exif data",
     "no_exif": "No Exif data",
     "exif": "Exif",

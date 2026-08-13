@@ -111,6 +111,13 @@ export type ItemData = PhotoSwipeSlideData & {
      */
     videoPlaylistURL?: string;
     /**
+     * The versioned pipeline that generated {@link videoPlaylistURL}.
+     *
+     * `null` identifies an existing stream whose playlist predates generator
+     * metadata. `undefined` means this item does not have a stream.
+     */
+    streamGenerator?: string | null;
+    /**
      * The DOM element ID of the `media-controller` element that is showing the
      * video for the current item.
      *
@@ -468,9 +475,16 @@ const enqueueUpdates = async (
                 playlistURL: videoPlaylistURL,
                 width,
                 height,
+                generator,
             } = hlsPlaylistData;
             update(
-                { ...videoURLD, videoPlaylistURL, width, height },
+                {
+                    ...videoURLD,
+                    videoPlaylistURL,
+                    width,
+                    height,
+                    streamGenerator: generator ?? null,
+                },
                 createHLSPlaylistItemDataValidity(),
             );
         } else {
