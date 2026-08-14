@@ -5,6 +5,12 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const JOB_ENV: &str = "ENTE_JASNA_FFMPEG_JOB";
 const REAL_FFMPEG_ENV: &str = "ENTE_JASNA_REAL_FFMPEG";
@@ -19,6 +25,7 @@ struct Job {
     key_info_path: String,
     status_path: String,
     duration_seconds: f64,
+    source_fps: Option<f64>,
     segment_duration: f64,
     min_bitrate: u64,
     target_bitrate: u64,
@@ -97,6 +104,7 @@ fn run() -> Result<i32, String> {
         .stdout
         .take()
         .ok_or_else(|| "real FFmpeg stdout is unavailable".to_owned())?;
+    let heartbeat = Heartbeat::start(&job);
     let mut out_time_us = 0_u64;
     for line in BufReader::new(stdout).lines() {
         let line = line.map_err(|error| format!("read FFmpeg progress: {error}"))?;
@@ -112,6 +120,7 @@ fn run() -> Result<i32, String> {
     let status = child
         .wait()
         .map_err(|error| format!("wait for real FFmpeg: {error}"))?;
+    drop(heartbeat);
     if let Err(error) = cleanup_temporary_output(&job) {
         write_status(&job, "error", None, Some(error.clone()))?;
         return Ok(1);
@@ -128,6 +137,51 @@ fn run() -> Result<i32, String> {
             Some(format!("FFmpeg exited with code {code}")),
         )?;
         Ok(code)
+    }
+}
+
+fn heartbeat_path(job: &Job) -> PathBuf {
+    PathBuf::from(format!("{}.heartbeat", job.status_path))
+}
+
+struct Heartbeat {
+    path: PathBuf,
+    running: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl Heartbeat {
+    fn start(job: &Job) -> Self {
+        let path = heartbeat_path(job);
+        let running = Arc::new(AtomicBool::new(true));
+        let thread_running = Arc::clone(&running);
+        let thread_path = path.clone();
+        let thread = thread::spawn(move || {
+            while thread_running.load(Ordering::Acquire) {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+                let _ = fs::write(&thread_path, now.to_string());
+                thread::park_timeout(Duration::from_secs(1));
+            }
+        });
+        Self {
+            path,
+            running,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for Heartbeat {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            thread.thread().unpark();
+            let _ = thread.join();
+        }
+        let _ = fs::remove_file(&self.path);
     }
 }
 
@@ -231,7 +285,7 @@ fn run_jasna_host(args: &[String]) -> Result<i32, String> {
 }
 
 fn run_jasna_child(args: &[String]) -> Result<i32, String> {
-    if args.first().map_or(true, |arg| arg != "--") || args.len() < 2 {
+    if args.first().is_none_or(|arg| arg != "--") || args.len() < 2 {
         return Err("child usage: --ente-jasna-child -- <command> [args]".to_owned());
     }
     let mut signal = [0_u8; 1];
@@ -311,11 +365,16 @@ fn rewrite_streaming_args(args: &[String], job: &Job) -> Result<Vec<String>, Str
         .position(|pair| pair[0] == "-i" && pair[1] == "pipe:0")
         .map(|index| index + 1)
         .ok_or_else(|| "rawvideo pipe input is missing".to_owned())?;
-    let source_fps = input_rate(args, pipe_input)?;
+    let jasna_fps = input_rate(args, pipe_input)?;
+    let source_fps = job
+        .source_fps
+        .filter(|fps| fps.is_finite() && *fps > 0.0)
+        .unwrap_or(jasna_fps);
     let output_fps = source_fps.min(job.max_fps as f64);
     let gop = (output_fps * job.segment_duration).round().max(1.0) as u64;
 
     let mut rewritten = args[..=pipe_input].to_vec();
+    set_input_rate(&mut rewritten, pipe_input, source_fps)?;
     let mut filters = Vec::new();
     let mut index = pipe_input + 1;
     while index < args.len().saturating_sub(1) {
@@ -376,6 +435,16 @@ fn input_rate(args: &[String], pipe_input: usize) -> Result<f64, String> {
         .and_then(|index| args.get(index + 1))
         .ok_or_else(|| "rawvideo input rate is missing".to_owned())?;
     parse_rate(value)
+}
+
+fn set_input_rate(args: &mut [String], pipe_input: usize, fps: f64) -> Result<(), String> {
+    let value_index = (0..pipe_input)
+        .rev()
+        .find(|index| args[*index] == "-r")
+        .map(|index| index + 1)
+        .ok_or_else(|| "rawvideo input rate is missing".to_owned())?;
+    args[value_index] = format!("{fps:.6}");
+    Ok(())
 }
 
 fn parse_rate(value: &str) -> Result<f64, String> {
@@ -506,6 +575,7 @@ mod tests {
             key_info_path: r"C:\output\key-info".to_owned(),
             status_path: r"C:\output\status.json".to_owned(),
             duration_seconds: 10.0,
+            source_fps: Some(120.0),
             segment_duration: 2.0,
             min_bitrate: 10_000_000,
             target_bitrate: 15_000_000,
@@ -582,8 +652,20 @@ mod tests {
 
     #[test]
     fn preserves_source_fps_below_limit() {
-        let result = rewrite_streaming_args(&args("60000/1001"), &job()).unwrap();
+        let mut job = job();
+        job.source_fps = Some(60_000.0 / 1_001.0);
+        let result = rewrite_streaming_args(&args("60000/1001"), &job).unwrap();
         assert!(has_pair(&result, "-g", "120"));
+        assert!(has_pair(&result, "-vf", "setsar=1/1"));
+    }
+
+    #[test]
+    fn uses_measured_fps_for_variable_frame_rate_input() {
+        let mut job = job();
+        job.source_fps = Some(25.0);
+        let result = rewrite_streaming_args(&args("60/1"), &job).unwrap();
+        assert!(has_pair(&result, "-r", "25.000000"));
+        assert!(has_pair(&result, "-g", "50"));
         assert!(has_pair(&result, "-vf", "setsar=1/1"));
     }
 }

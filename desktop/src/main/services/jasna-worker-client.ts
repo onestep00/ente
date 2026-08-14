@@ -16,8 +16,13 @@ import log from "../log-worker";
 
 const jasnaPathEnvVar = "ENTE_JASNA_PATH";
 const jasnaArgsEnvVar = "ENTE_JASNA_ARGS_JSON";
+const jasnaFirewallRuleName = "Ente managed Jasna local-only";
 const startupTimeoutMs = 60 * 60 * 1000;
-const statusPollIntervalMs = 500;
+const statusPollIntervalMs = 250;
+const jobStallTimeoutMs = 2 * 60 * 1000;
+const heartbeatTimeoutMs = 5 * 1000;
+const maximumJobTimeoutMs = 24 * 60 * 60 * 1000;
+const maximumJobAttempts = 2;
 
 const managedJasnaArgs = [
     "--batch-size",
@@ -61,6 +66,7 @@ interface JasnaJob {
     outputDir: string;
     keyInfoPath: string;
     durationSeconds: number;
+    fps: number | undefined;
     onProgress: (progress: number) => void;
 }
 
@@ -86,6 +92,11 @@ let installPromise: Promise<string> | undefined;
 let resolvedExecutable: string | undefined;
 let installRetryAfter = 0;
 let lastInstallError: Error | undefined;
+let firewalledExecutable: string | undefined;
+
+interface JobCompletion {
+    recoveredFromOutput: boolean;
+}
 
 const execFileAsync = promisify(execFile);
 const managedRelease = "v0.10.0";
@@ -477,6 +488,7 @@ const startWorkerOnce = async () => {
             cause: error,
         });
     }
+    await ensureInboundBlocked(executable);
     await ensureManagedDetectionModel(executable);
     const { jobPath, realFFmpegPath } = await installProxy(executable);
     const port = await reservePort();
@@ -531,6 +543,52 @@ const startWorkerOnce = async () => {
     return readyPromise;
 };
 
+const ensureInboundBlocked = async (executable: string) => {
+    if (firewalledExecutable == executable) return;
+    const checkScript = [
+        `$rule = Get-NetFirewallRule -DisplayName '${jasnaFirewallRuleName}' -ErrorAction SilentlyContinue`,
+        "$filter = $rule | Where-Object { $_.Enabled -eq 'True' -and $_.Direction -eq 'Inbound' -and $_.Action -eq 'Block' } | Get-NetFirewallApplicationFilter",
+        `if ($filter.Program -ine '${powershellLiteral(executable)}') { exit 1 }`,
+    ].join("; ");
+    try {
+        await execFileAsync("powershell.exe", [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            checkScript,
+        ]);
+    } catch {
+        const installScript = [
+            "$ErrorActionPreference = 'Stop'",
+            `$ruleName = '${jasnaFirewallRuleName}'`,
+            `Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule`,
+            `New-NetFirewallRule -DisplayName $ruleName -Description 'Block non-loopback inbound access to the Jasna worker managed by Ente.' -Direction Inbound -Action Block -Program '${powershellLiteral(executable)}' -Protocol TCP -Profile Any -Enabled True | Out-Null`,
+        ].join("; ");
+        const encoded = Buffer.from(installScript, "utf16le").toString(
+            "base64",
+        );
+        const elevateScript = [
+            `$powershell = Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'`,
+            `$process = Start-Process -FilePath $powershell -ArgumentList @('-NoProfile','-NonInteractive','-EncodedCommand','${encoded}') -Verb RunAs -Wait -PassThru`,
+            "exit $process.ExitCode",
+        ].join("; ");
+        await execFileAsync(
+            "powershell.exe",
+            ["-NoProfile", "-NonInteractive", "-Command", elevateScript],
+            { timeout: 2 * 60 * 1000, windowsHide: false },
+        );
+        await execFileAsync("powershell.exe", [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            checkScript,
+        ]);
+    }
+    firewalledExecutable = executable;
+};
+
+const powershellLiteral = (value: string) => value.replaceAll("'", "''");
+
 const startWorker = () => {
     if (child && readyPromise) return readyPromise;
     if (startingPromise) return startingPromise;
@@ -546,6 +604,21 @@ const startWorker = () => {
             startingPromise = undefined;
         });
     return startingPromise;
+};
+
+const stopWorker = async () => {
+    const worker = child;
+    child = undefined;
+    workerPort = undefined;
+    readyPromise = undefined;
+    startingPromise = undefined;
+    if (!worker || worker.exitCode !== null) return;
+    const exited = new Promise<void>((resolve) => worker.once("exit", resolve));
+    worker.kill();
+    await Promise.race([
+        exited,
+        new Promise<void>((resolve) => setTimeout(resolve, 5000)),
+    ]);
 };
 
 const waitUntilReady = async (port: number) => {
@@ -568,81 +641,279 @@ export const runJasnaHLSJob = async (job: JasnaJob) => {
     jobTail = new Promise<void>((resolve) => (release = resolve));
     await previous;
     try {
-        try {
-            await startWorker();
-        } catch (error) {
-            if (String(error).includes("ENTE_JASNA_UNAVAILABLE")) throw error;
-            throw new Error(`ENTE_JASNA_UNAVAILABLE: ${String(error)}`, {
-                cause: error,
-            });
-        }
-        const port = workerPort;
-        const runtimeDirectory = workerPaths?.runtimeDirectory;
-        if (!port || !runtimeDirectory) throw new Error("Jasna did not start");
-        const jobId = randomUUID();
-        const jobPath = path.join(runtimeDirectory, "current-job.json");
-        const statusPath = path.join(job.outputDir, "jasna-status.json");
-        await writeJSONAtomically(jobPath, {
-            version: 1,
-            jobId,
-            inputPath: job.inputPath,
-            outputDir: job.outputDir,
-            keyInfoPath: job.keyInfoPath,
-            statusPath,
-            durationSeconds: job.durationSeconds,
-            segmentDuration: 2,
-            minBitrate: 10_000_000,
-            targetBitrate: 15_000_000,
-            maxBitrate: 20_000_000,
-            maxFps: 60,
-        });
-        try {
-            const load = fetch(`http://127.0.0.1:${port}/api/load`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ path: job.inputPath }),
-            }).then(async (response) => {
-                if (!response.ok)
-                    throw new Error(
-                        `Jasna load failed: HTTP ${response.status} ${await response.text()}`,
+        let lastError: unknown;
+        for (let attempt = 1; attempt <= maximumJobAttempts; attempt++) {
+            try {
+                const completion = await runJasnaHLSAttempt(job);
+                if (completion.recoveredFromOutput) {
+                    log.warn(
+                        "Jasna FFmpeg completed without publishing status; keeping the ready worker",
                     );
-            });
-            await Promise.all([
-                load,
-                waitForJob(statusPath, jobId, job.onProgress),
-            ]);
-        } catch (error) {
-            await stopCurrentJob(port);
-            throw error;
-        } finally {
-            await Promise.all([
-                fs.rm(jobPath, { force: true }),
-                fs.rm(statusPath, { force: true }),
-            ]);
+                }
+                return;
+            } catch (error) {
+                lastError = error;
+                log.warn(
+                    `Jasna HLS attempt ${attempt}/${maximumJobAttempts} failed`,
+                    error,
+                );
+                await stopWorker();
+                if (String(error).includes("ENTE_JASNA_UNAVAILABLE"))
+                    throw error;
+                if (attempt < maximumJobAttempts) {
+                    await clearJobOutput(job.outputDir);
+                }
+            }
         }
+        throw lastError;
     } finally {
         release();
     }
 };
 
+const runJasnaHLSAttempt = async (job: JasnaJob): Promise<JobCompletion> => {
+    try {
+        await startWorker();
+    } catch (error) {
+        if (String(error).includes("ENTE_JASNA_UNAVAILABLE")) throw error;
+        throw new Error(`ENTE_JASNA_UNAVAILABLE: ${String(error)}`, {
+            cause: error,
+        });
+    }
+    const port = workerPort;
+    const runtimeDirectory = workerPaths?.runtimeDirectory;
+    const activeWorker = child;
+    if (!port || !runtimeDirectory || !activeWorker)
+        throw new Error("Jasna did not start");
+    const jobId = randomUUID();
+    const jobPath = path.join(runtimeDirectory, "current-job.json");
+    const statusPath = path.join(job.outputDir, "jasna-status.json");
+    const heartbeatPath = `${statusPath}.heartbeat`;
+    const controller = new AbortController();
+    await clearJobOutput(job.outputDir);
+    await writeJSONAtomically(jobPath, {
+        version: 1,
+        jobId,
+        inputPath: job.inputPath,
+        outputDir: job.outputDir,
+        keyInfoPath: job.keyInfoPath,
+        statusPath,
+        durationSeconds: job.durationSeconds,
+        sourceFps: job.fps,
+        segmentDuration: 2,
+        minBitrate: 10_000_000,
+        targetBitrate: 15_000_000,
+        maxBitrate: 20_000_000,
+        maxFps: 60,
+    });
+    try {
+        let removeExitListener = () => undefined;
+        const workerExit = new Promise<never>((_, reject) => {
+            const onExit = (
+                code: number | null,
+                signal: NodeJS.Signals | null,
+            ) =>
+                reject(
+                    new Error(
+                        `Jasna worker exited during the job (${code ?? signal ?? "unknown"})`,
+                    ),
+                );
+            activeWorker.once("exit", onExit);
+            removeExitListener = () => {
+                activeWorker.off("exit", onExit);
+            };
+        });
+        const loadFailure = fetch(`http://127.0.0.1:${port}/api/load`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: job.inputPath }),
+            signal: controller.signal,
+        }).then(async (response) => {
+            if (!response.ok)
+                throw new Error(
+                    `Jasna load failed: HTTP ${response.status} ${await response.text()}`,
+                );
+            return new Promise<never>(() => undefined);
+        });
+        try {
+            return await Promise.race([
+                waitForJob(job, statusPath, jobId),
+                loadFailure,
+                workerExit,
+            ]);
+        } finally {
+            removeExitListener();
+        }
+    } catch (error) {
+        await stopCurrentJob(port);
+        throw error;
+    } finally {
+        controller.abort();
+        await Promise.all([
+            fs.rm(jobPath, { force: true }),
+            fs.rm(statusPath, { force: true }),
+            fs.rm(heartbeatPath, { force: true }),
+        ]);
+    }
+};
+
 const waitForJob = async (
+    job: JasnaJob,
     statusPath: string,
     jobId: string,
-    onProgress: (progress: number) => void,
-) => {
+): Promise<JobCompletion> => {
+    const deadline =
+        Date.now() +
+        Math.min(
+            maximumJobTimeoutMs,
+            Math.max(30 * 60 * 1000, job.durationSeconds * 20 * 1000),
+        );
+    let lastActivity = Date.now();
+    let lastProgress = -1;
+    let lastOutputSize = -1;
+    let lastHeartbeat = 0;
     while (true) {
         const status = await readStatus(statusPath);
         if (status?.version == 1 && status.jobId == jobId) {
-            if (typeof status.progress == "number") onProgress(status.progress);
-            if (status.state == "complete") return;
+            if (
+                typeof status.progress == "number" &&
+                status.progress > lastProgress
+            ) {
+                lastProgress = status.progress;
+                lastActivity = Date.now();
+                job.onProgress(status.progress);
+            }
+            if (status.state == "complete") {
+                await validateCompletedOutput(job);
+                job.onProgress(1);
+                return { recoveredFromOutput: false };
+            }
             if (status.state == "error")
                 throw new Error(status.error ?? "Jasna FFmpeg failed");
         }
+        const outputSize = await fileSize(
+            path.join(job.outputDir, "output.ts"),
+        );
+        if (outputSize > lastOutputSize) {
+            lastOutputSize = outputSize;
+            lastActivity = Date.now();
+        }
+        const heartbeat = await fileModifiedTime(`${statusPath}.heartbeat`);
+        if (heartbeat > lastHeartbeat) {
+            lastHeartbeat = heartbeat;
+            lastActivity = Date.now();
+        }
+        if (await completedOutputIsValid(job)) {
+            await fs
+                .rm(path.join(job.outputDir, "output.ts.tmp"), { force: true })
+                .catch((error: unknown) =>
+                    log.warn(
+                        "Could not remove completed Jasna temp output",
+                        error,
+                    ),
+                );
+            job.onProgress(1);
+            return { recoveredFromOutput: true };
+        }
+        if (Date.now() >= deadline) throw new Error("Jasna job timed out");
+        if (
+            lastHeartbeat > 0 &&
+            Date.now() - lastHeartbeat >= heartbeatTimeoutMs &&
+            Date.now() - lastActivity >= heartbeatTimeoutMs
+        )
+            throw new Error("Jasna FFmpeg heartbeat stopped for 5 seconds");
+        if (Date.now() - lastActivity >= jobStallTimeoutMs)
+            throw new Error("Jasna job made no progress for 2 minutes");
         await new Promise((resolve) =>
             setTimeout(resolve, statusPollIntervalMs),
         );
     }
 };
+
+const completedOutputIsValid = async (job: JasnaJob) => {
+    try {
+        await validateCompletedOutput(job);
+        return true;
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code == "ENOENT") return false;
+        if (
+            String(error).includes("is not complete") ||
+            String(error).includes("byte ranges exceed")
+        )
+            return false;
+        throw error;
+    }
+};
+
+const validateCompletedOutput = async (job: JasnaJob) => {
+    const playlist = await fs.readFile(
+        path.join(job.outputDir, "output.m3u8"),
+        "utf8",
+    );
+    const outputSize = await fileSize(path.join(job.outputDir, "output.ts"));
+    validateJasnaHLSPlaylist(playlist, job.durationSeconds, outputSize);
+};
+
+export const validateJasnaHLSPlaylist = (
+    playlist: string,
+    expectedDuration: number,
+    outputSize: number,
+) => {
+    if (!playlist.split(/\r?\n/).includes("#EXT-X-ENDLIST"))
+        throw new Error("Jasna HLS output is not complete");
+    const durations = [...playlist.matchAll(/^#EXTINF:([0-9.]+),/gm)].map(
+        (match) => Number(match[1]),
+    );
+    if (!durations.length || durations.some((duration) => !duration))
+        throw new Error("Jasna HLS playlist has invalid segment durations");
+    const outputDuration = durations.reduce(
+        (sum, duration) => sum + duration,
+        0,
+    );
+    const durationTolerance = Math.max(4, expectedDuration * 0.02);
+    if (Math.abs(outputDuration - expectedDuration) > durationTolerance)
+        throw new Error(
+            `Jasna HLS duration mismatch: ${outputDuration.toFixed(3)}/${expectedDuration.toFixed(3)} seconds`,
+        );
+    if (outputSize <= 0) throw new Error("Jasna HLS output is empty");
+    const ranges = [...playlist.matchAll(/^#EXT-X-BYTERANGE:(\d+)@(\d+)$/gm)];
+    if (!ranges.length)
+        throw new Error("Jasna HLS playlist has no byte ranges");
+    const requiredSize = Math.max(
+        ...ranges.map((match) => Number(match[1]) + Number(match[2])),
+    );
+    if (!Number.isSafeInteger(requiredSize) || requiredSize > outputSize)
+        throw new Error("Jasna HLS byte ranges exceed the output size");
+};
+
+const fileSize = async (filePath: string) => {
+    try {
+        return (await fs.stat(filePath)).size;
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code == "ENOENT") return 0;
+        throw error;
+    }
+};
+
+const fileModifiedTime = async (filePath: string) => {
+    try {
+        return (await fs.stat(filePath)).mtimeMs;
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code == "ENOENT") return 0;
+        throw error;
+    }
+};
+
+const clearJobOutput = (outputDir: string) =>
+    Promise.all(
+        [
+            "output.m3u8",
+            "output.ts",
+            "output.ts.tmp",
+            "jasna-status.json",
+            "jasna-status.json.heartbeat",
+        ].map((name) => fs.rm(path.join(outputDir, name), { force: true })),
+    );
 
 const readStatus = async (statusPath: string) => {
     try {
@@ -663,7 +934,10 @@ const readStatus = async (statusPath: string) => {
 
 const stopCurrentJob = async (port: number) => {
     try {
-        await fetch(`http://127.0.0.1:${port}/api/stop`, { method: "POST" });
+        await fetch(`http://127.0.0.1:${port}/api/stop`, {
+            method: "POST",
+            signal: AbortSignal.timeout(5000),
+        });
     } catch (error) {
         log.warn("Failed to stop the current Jasna job", error);
     }

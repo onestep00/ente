@@ -464,7 +464,7 @@ export interface FFmpegGenerateHLSPlaylistAndSegmentsResult {
     dimensions: { width: number; height: number };
     videoSize: number;
     videoObjectID: string;
-    generator: "ente-ffmpeg-v1" | "jasna-ente-v2";
+    generator: "ente-ffmpeg-v1" | "jasna-ente-v3";
 }
 
 /**
@@ -896,6 +896,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
                 outputDir: outputPathPrefix,
                 keyInfoPath,
                 durationSeconds,
+                fps,
                 onProgress: (progress) =>
                     mainProcess("ffmpegProgress", { fileID, progress }),
             });
@@ -972,7 +973,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
         dimensions,
         videoSize,
         videoObjectID,
-        generator: isJasnaConfigured() ? "jasna-ente-v2" : "ente-ffmpeg-v1",
+        generator: isJasnaConfigured() ? "jasna-ente-v3" : "ente-ffmpeg-v1",
     };
 };
 
