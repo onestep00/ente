@@ -337,7 +337,9 @@ const handleGenerateHLSWrite = async (
     const outputFilePathPrefix = await makeTempFilePath();
     let result: FFmpegGenerateHLSPlaylistAndSegmentsResult | undefined;
     try {
+        log.info(`[hls-pipeline] preparing source for file ${fileID}`);
         await input.prepare();
+        log.info(`[hls-pipeline] source ready for file ${fileID}`);
 
         try {
             result = await worker.ffmpegGenerateHLSPlaylistAndSegments(

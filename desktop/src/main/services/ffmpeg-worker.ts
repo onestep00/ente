@@ -892,6 +892,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
             if (!width || !height || !durationSeconds)
                 throw new Error("Jasna requires video dimensions and duration");
             await runJasnaHLSJob({
+                fileID,
                 inputPath: inputFilePath,
                 outputDir: outputPathPrefix,
                 keyInfoPath,
@@ -943,6 +944,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
         // the generated .ts file.
         videoSize = await fs.stat(videoPath).then((st) => st.size);
 
+        log.info(`HLS segment upload started for file ${fileID}`);
         videoObjectID = await uploadVideoSegments(
             videoPath,
             videoSize,
@@ -950,6 +952,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
             fetchURL,
             authToken,
         );
+        log.info(`HLS segment upload completed for file ${fileID}`);
 
         mainProcess("ffmpegProgress", { fileID, progress: 1 });
     } catch (e) {
@@ -1519,39 +1522,70 @@ const uploadVideoSegmentsMultipart = async (
     partUploadURLs: string[],
     completionURL: string,
 ) => {
-    // The part we're currently uploading.
-    let partNumber = 0;
-    // A rolling offset into the file.
-    let start = 0;
+    const parts = partUploadURLs.map((url, index) => {
+        const start = index * partSize;
+        const size = Math.min(start + partSize, videoSize) - start;
+        return { url, partNumber: index + 1, start, size };
+    });
+    if (parts.some(({ size }) => size <= 0))
+        throw new Error("Multipart upload URL count exceeds the video size");
+
+    const eTags = new Array<string>(parts.length);
+    let nextPartIndex = 0;
+    let uploadFailure: unknown;
+    const uploadNextPart = async () => {
+        try {
+            while (!uploadFailure) {
+                const index = nextPartIndex++;
+                const part = parts[index];
+                if (!part) return;
+                const end = part.start + part.size - 1;
+                const res = await retryEnsuringHTTPOk(() =>
+                    fetch(part.url, {
+                        method: "PUT",
+                        headers: {
+                            ...publicRequestHeaders(desktopAppVersion()),
+                            "Content-Length": `${part.size}`,
+                        },
+                        // See: [Note: duplex param required for stream body]
+                        // @ts-expect-error ^see note above
+                        duplex: "half",
+                        body: Readable.toWeb(
+                            // start and end are inclusive 0-indexed byte offsets.
+                            fs_.createReadStream(videoFilePath, {
+                                start: part.start,
+                                end,
+                            }),
+                        ),
+                    }),
+                );
+                const eTag = res.headers.get("etag");
+                if (!eTag) throw new Error("Response did not have an ETag");
+                eTags[index] = eTag;
+            }
+        } catch (error) {
+            uploadFailure ??= error;
+        }
+    };
+
+    const multipartUploadConcurrency = 2;
+    await Promise.all(
+        Array.from(
+            { length: Math.min(multipartUploadConcurrency, parts.length) },
+            uploadNextPart,
+        ),
+    );
+    if (uploadFailure) {
+        if (uploadFailure instanceof Error) throw uploadFailure;
+        throw new Error("Multipart upload failed", { cause: uploadFailure });
+    }
+
     // See `createMultipartUploadRequestBody` in the web code for a more
     // expansive and documented version of this XML body construction.
     const completionXML = ["<CompleteMultipartUpload>"];
-    for (const partUploadURL of partUploadURLs) {
-        partNumber += 1;
-        const size = Math.min(start + partSize, videoSize) - start;
-        const end = start + size - 1;
-        const res = await retryEnsuringHTTPOk(() =>
-            fetch(partUploadURL, {
-                method: "PUT",
-                headers: {
-                    ...publicRequestHeaders(desktopAppVersion()),
-                    "Content-Length": `${size}`,
-                },
-                // See: [Note: duplex param required for stream body]
-                // @ts-expect-error ^see note above
-                duplex: "half",
-                body: Readable.toWeb(
-                    // start and end are inclusive 0-indexed range of bytes to
-                    // read from the file.
-                    fs_.createReadStream(videoFilePath, { start, end }),
-                ),
-            }),
-        );
-        const eTag = res.headers.get("etag");
-        if (!eTag) throw new Error("Response did not have an ETag");
-        start += size;
+    for (const [index, part] of parts.entries()) {
         completionXML.push(
-            `<Part><PartNumber>${partNumber}</PartNumber><ETag>${eTag}</ETag></Part>`,
+            `<Part><PartNumber>${part.partNumber}</PartNumber><ETag>${eTags[index]}</ETag></Part>`,
         );
     }
     completionXML.push("</CompleteMultipartUpload>");

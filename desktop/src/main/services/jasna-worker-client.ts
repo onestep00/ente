@@ -62,6 +62,7 @@ interface JasnaJobStatus {
 }
 
 interface JasnaJob {
+    fileID: number;
     inputPath: string;
     outputDir: string;
     keyInfoPath: string;
@@ -639,7 +640,9 @@ export const runJasnaHLSJob = async (job: JasnaJob) => {
     const previous = jobTail;
     let release!: () => void;
     jobTail = new Promise<void>((resolve) => (release = resolve));
+    log.info(`Jasna HLS queued for file ${job.fileID}`);
     await previous;
+    log.info(`Jasna HLS started for file ${job.fileID}`);
     try {
         let lastError: unknown;
         for (let attempt = 1; attempt <= maximumJobAttempts; attempt++) {

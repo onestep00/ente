@@ -88,6 +88,7 @@ const recreateStreamMinRatio = 0.5;
 const recreateSourceMinRatio = 0.8;
 const bitrateCapHeadroom = 1.3;
 const progressPollIntervalMs = 2000;
+const processingPipelineWidth = 2;
 
 /**
  * Internal in-memory state shared by the functions in this module.
@@ -920,10 +921,10 @@ const tickNow = () => {
 export const isHLSGenerationEnabled = () => _state.isHLSGenerationEnabled;
 
 /**
- * The video processing loop goes through videos one by one, preferring items in
- * the liveQueue, otherwise working for a backlog item. If there are no items to
- * process, it goes on an idle timeout. The {@link resolveTick} state property
- * can be used to tickle it out of sleep.
+ * The video processing loop keeps two items in flight, preferring items in the
+ * liveQueue, otherwise working from the backlog. The native Jasna client still
+ * admits one GPU job at a time, so the second item downloads and prepares its
+ * seekable input while the first item is restored, encoded, or uploaded.
  *
  * [Note: Exiting idle wait of processing loop]
  *
@@ -969,53 +970,77 @@ const processQueue = async () => {
     const transientFailedFileIDs = new Set<number>();
 
     let bq: typeof _state.liveQueue | undefined;
-    while (isHLSGenerationEnabled()) {
-        let item = _state.liveQueue.shift();
-        if (!item) {
-            // Initialize or refill queue.
-            if (!bq?.length) {
-                if (_state.haveSyncedOnce) {
-                    bq = await backfillQueue(userID);
-                } else {
-                    log.info("Not attempting backfill until first sync");
-                }
-            }
-            // Take item if queue is not empty.
-            if (bq?.length) item = bq.pop();
-        }
-        if (item && !transientFailedFileIDs.has(item.file.id)) {
-            const remainingIncludingCurrent =
-                _state.liveQueue.length + (bq?.length ?? 0) + 1;
-            _state.processingDone ??= 0;
-            _state.processingTotal =
-                _state.processingDone + remainingIncludingCurrent;
+    const active = new Map<Promise<void>, VideoProcessingQueueItem>();
+    const activeFileIDs = new Set<number>();
+
+    const remainingCount = () => _state.liveQueue.length + (bq?.length ?? 0);
+
+    const emitPipelineSnapshot = () => {
+        _state.processingDone ??= 0;
+        _state.processingTotal =
+            _state.processingDone + active.size + remainingCount();
+        emitProcessingSnapshot();
+    };
+
+    const startItem = (item: VideoProcessingQueueItem) => {
+        activeFileIDs.add(item.file.id);
+        if (_state.currentFileID === undefined) {
             _state.currentFileID = item.file.id;
             _state.currentProgress = undefined;
+        }
 
-            updateSnapshotIfNeeded("processing");
-            emitProcessingSnapshot();
-
+        let task!: Promise<void>;
+        task = (async () => {
             try {
                 await processQueueItem(item);
                 await markProcessedVideoFileID(item.file.id);
-                // Reset the idle wait on success.
                 _state.idleWait = idleWaitInitial;
             } catch (e) {
-                // This will get retried again at some point later.
                 log.error(`Failed to process video ${fileLogID(item.file)}`, e);
                 transientFailedFileIDs.add(item.file.id);
             } finally {
-                const remaining = _state.liveQueue.length + (bq?.length ?? 0);
-                _state.processingDone += 1;
-                _state.processingTotal = _state.processingDone + remaining;
-                _state.currentFileID = undefined;
-                _state.currentProgress = undefined;
-                emitProcessingSnapshot();
+                active.delete(task);
+                activeFileIDs.delete(item.file.id);
+                _state.processingDone = (_state.processingDone ?? 0) + 1;
+                if (_state.currentFileID == item.file.id) {
+                    const next = active.values().next().value;
+                    _state.currentFileID = next?.file.id;
+                    _state.currentProgress = undefined;
+                }
+                emitPipelineSnapshot();
             }
+        })();
+        active.set(task, item);
+        updateSnapshotIfNeeded("processing");
+        emitPipelineSnapshot();
+    };
+
+    while (isHLSGenerationEnabled()) {
+        let loadedBackfill = false;
+        while (active.size < processingPipelineWidth) {
+            let item = _state.liveQueue.shift();
+            if (!item && !bq?.length && !loadedBackfill) {
+                loadedBackfill = true;
+                if (_state.haveSyncedOnce) {
+                    bq = await backfillQueue(userID);
+                } else if (active.size == 0) {
+                    log.info("Not attempting backfill until first sync");
+                }
+            }
+            if (!item && bq?.length) item = bq.pop();
+            if (!item) break;
+            if (
+                transientFailedFileIDs.has(item.file.id) ||
+                activeFileIDs.has(item.file.id)
+            ) {
+                continue;
+            }
+            startItem(item);
+        }
+
+        if (active.size > 0) {
+            await Promise.race(active.keys());
         } else {
-            // There are no more items in either the live queue or backlog.
-            // Go to sleep (for increasingly longer durations, capped at a
-            // maximum).
             resetProcessingStats();
             updateSnapshotIfNeeded("idle");
 
@@ -1031,6 +1056,8 @@ const processQueue = async () => {
             await Promise.race([tick, wait(idleWait)]);
         }
     }
+
+    await Promise.allSettled(active.keys());
 
     resetProcessingStats();
     updateSnapshotIfNeeded(undefined);
@@ -1195,7 +1222,12 @@ const backfillQueue = async (
 };
 
 const updateCurrentProgress = (fileID: number, progress: number) => {
-    if (_state.currentFileID != fileID) return;
+    if (_state.currentFileID != fileID) {
+        if (_state.currentProgress !== undefined && _state.currentProgress < 1)
+            return;
+        _state.currentFileID = fileID;
+        _state.currentProgress = undefined;
+    }
     const clamped = Math.min(1, Math.max(0, progress));
     const previous = _state.currentProgress;
     if (previous !== undefined && Math.abs(previous - clamped) < 0.01) {
