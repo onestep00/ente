@@ -27,6 +27,7 @@ import {
     JasnaUnavailableError,
     readGenerateHLSProgress,
     readVideoStream,
+    SourcePreparationError,
     videoStreamDone,
     type GenerateHLSResult,
 } from "../utils/native-stream";
@@ -39,7 +40,6 @@ import {
 } from "./file-data";
 import {
     fileSystemUploadItemIfUnchanged,
-    type FileSystemUploadItem,
     type ProcessableUploadItem,
     type TimestampedFileSystemUploadItem,
 } from "./upload";
@@ -127,6 +127,8 @@ class VideoState {
     currentFileID: number | undefined;
     /** Current encode progress [0,1] for the active file. */
     currentProgress: number | undefined;
+    /** Items currently occupying the bounded processing pipeline. */
+    activeVideoItems = new Map<number, VideoProcessingQueueItem>();
     /**
      * Queue of recently uploaded items waiting to be processed.
      */
@@ -807,6 +809,10 @@ const enqueueVideoProcessingItems = (items: VideoProcessingQueueItem[]) => {
             }
             continue;
         }
+        const active = _state.activeVideoItems.get(item.file.id);
+        if (active && (!item.forceRecreate || active.forceRecreate)) {
+            continue;
+        }
         if (item.priority) priorityItems.push(item);
         else _state.liveQueue.push(item);
         queuedByID.set(item.file.id, item);
@@ -972,18 +978,31 @@ const processQueue = async () => {
     let bq: typeof _state.liveQueue | undefined;
     const active = new Map<Promise<void>, VideoProcessingQueueItem>();
     const activeFileIDs = new Set<number>();
+    let lastLoggedQueueSnapshot: string | undefined;
 
     const remainingCount = () => _state.liveQueue.length + (bq?.length ?? 0);
 
     const emitPipelineSnapshot = () => {
         _state.processingDone ??= 0;
-        _state.processingTotal =
+        const observedTotal =
             _state.processingDone + active.size + remainingCount();
+        _state.processingTotal = Math.max(
+            _state.processingTotal ?? 0,
+            observedTotal,
+        );
+        const queueSnapshot = `${_state.processingDone}/${_state.processingTotal}/${active.size}/${remainingCount()}`;
+        if (queueSnapshot != lastLoggedQueueSnapshot) {
+            lastLoggedQueueSnapshot = queueSnapshot;
+            log.info(
+                `HLS queue | done=${_state.processingDone} total=${_state.processingTotal} active=${active.size} queued=${remainingCount()}`,
+            );
+        }
         emitProcessingSnapshot();
     };
 
     const startItem = (item: VideoProcessingQueueItem) => {
         activeFileIDs.add(item.file.id);
+        _state.activeVideoItems.set(item.file.id, item);
         if (_state.currentFileID === undefined) {
             _state.currentFileID = item.file.id;
             _state.currentProgress = undefined;
@@ -1001,6 +1020,7 @@ const processQueue = async () => {
             } finally {
                 active.delete(task);
                 activeFileIDs.delete(item.file.id);
+                _state.activeVideoItems.delete(item.file.id);
                 _state.processingDone = (_state.processingDone ?? 0) + 1;
                 if (_state.currentFileID == item.file.id) {
                     const next = active.values().next().value;
@@ -1018,7 +1038,13 @@ const processQueue = async () => {
     while (isHLSGenerationEnabled()) {
         let loadedBackfill = false;
         while (active.size < processingPipelineWidth) {
-            let item = _state.liveQueue.shift();
+            const liveIndex = _state.liveQueue.findIndex(
+                (candidate) => !activeFileIDs.has(candidate.file.id),
+            );
+            let item =
+                liveIndex >= 0
+                    ? _state.liveQueue.splice(liveIndex, 1)[0]
+                    : undefined;
             if (!item && !bq?.length && !loadedBackfill) {
                 loadedBackfill = true;
                 if (_state.haveSyncedOnce) {
@@ -1027,11 +1053,16 @@ const processQueue = async () => {
                     log.info("Not attempting backfill until first sync");
                 }
             }
-            if (!item && bq?.length) item = bq.pop();
+            while (!item && bq?.length) {
+                const candidate = bq.pop();
+                if (candidate && !activeFileIDs.has(candidate.file.id)) {
+                    item = candidate;
+                }
+            }
             if (!item) break;
             if (
-                transientFailedFileIDs.has(item.file.id) ||
-                activeFileIDs.has(item.file.id)
+                transientFailedFileIDs.has(item.file.id) &&
+                !item.forceRecreate
             ) {
                 continue;
             }
@@ -1352,19 +1383,6 @@ const processQueueItem = async ({
           )
         : undefined;
 
-    let sourceVideo: FileSystemUploadItem | ReadableStream | undefined =
-        uploadItem;
-    if (!sourceVideo) {
-        try {
-            sourceVideo = (await downloadManager.fileStream(file, {
-                background: true,
-            }))!;
-        } catch (e) {
-            if (!isNetworkDownloadError(e)) await markFailedVideoFile(file);
-            throw e;
-        }
-    }
-
     // [Note: Upload HLS video segment from node side]
     //
     // The generated video can be huge (multi-GB), too large to read it into
@@ -1405,13 +1423,37 @@ const processQueueItem = async ({
     let res: GenerateHLSResult | undefined;
     const stopProgressPolling = startHLSProgressPolling(electron, file.id);
     try {
-        res = await initiateGenerateHLS(
-            electron,
-            sourceVideo,
-            file.id,
-            fetchURL,
-            authToken,
-        );
+        const maximumSourceAttempts = uploadItem ? 1 : 2;
+        for (let attempt = 1; attempt <= maximumSourceAttempts; attempt++) {
+            try {
+                const sourceVideo =
+                    uploadItem ??
+                    (await downloadManager.fileStream(file, {
+                        background: true,
+                        bypassObjectURLCache: true,
+                    }))!;
+                res = await initiateGenerateHLS(
+                    electron,
+                    sourceVideo,
+                    file.id,
+                    fetchURL,
+                    authToken,
+                );
+                break;
+            } catch (e) {
+                const retryableSourceFailure =
+                    e instanceof SourcePreparationError ||
+                    isNetworkDownloadError(e);
+                if (retryableSourceFailure && attempt < maximumSourceAttempts) {
+                    log.warn(
+                        `Generate HLS for ${fileLogID(file)} | source retry ${attempt}/${maximumSourceAttempts}`,
+                        e,
+                    );
+                    continue;
+                }
+                throw e;
+            }
+        }
     } catch (e) {
         // Failures during stream generation on the native side are expected to
         // happen in two cases:
@@ -1424,7 +1466,11 @@ const processQueueItem = async ({
         // The native side code already retries failures for case 2 (except HTTP
         // 4xx errors). Thus, usually we should come here only for case 1, and
         // retrying the same video again will not work either.
-        if (!(e instanceof JasnaUnavailableError))
+        if (
+            !(e instanceof JasnaUnavailableError) &&
+            !(e instanceof SourcePreparationError) &&
+            !isNetworkDownloadError(e)
+        )
             await markFailedVideoFile(file);
         throw e;
     } finally {

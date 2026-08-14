@@ -622,6 +622,12 @@ const stopWorker = async () => {
     ]);
 };
 
+const isTransientFileAccessError = (error: unknown) => {
+    if (!error || typeof error != "object" || !("code" in error)) return false;
+    const code = error.code;
+    return code == "EBUSY" || code == "EPERM" || code == "EACCES";
+};
+
 const waitUntilReady = async (port: number) => {
     const deadline = Date.now() + startupTimeoutMs;
     while (Date.now() < deadline) {
@@ -753,9 +759,9 @@ const runJasnaHLSAttempt = async (job: JasnaJob): Promise<JobCompletion> => {
     } finally {
         controller.abort();
         await Promise.all([
-            fs.rm(jobPath, { force: true }),
-            fs.rm(statusPath, { force: true }),
-            fs.rm(heartbeatPath, { force: true }),
+            removeFileWithTransientRetry(jobPath),
+            removeFileWithTransientRetry(statusPath),
+            removeFileWithTransientRetry(heartbeatPath),
         ]);
     }
 };
@@ -838,7 +844,11 @@ const completedOutputIsValid = async (job: JasnaJob) => {
         await validateCompletedOutput(job);
         return true;
     } catch (error) {
-        if ((error as NodeJS.ErrnoException).code == "ENOENT") return false;
+        if (
+            (error as NodeJS.ErrnoException).code == "ENOENT" ||
+            isTransientFileAccessError(error)
+        )
+            return false;
         if (
             String(error).includes("is not complete") ||
             String(error).includes("byte ranges exceed")
@@ -893,7 +903,11 @@ const fileSize = async (filePath: string) => {
     try {
         return (await fs.stat(filePath)).size;
     } catch (error) {
-        if ((error as NodeJS.ErrnoException).code == "ENOENT") return 0;
+        if (
+            (error as NodeJS.ErrnoException).code == "ENOENT" ||
+            isTransientFileAccessError(error)
+        )
+            return 0;
         throw error;
     }
 };
@@ -902,21 +916,38 @@ const fileModifiedTime = async (filePath: string) => {
     try {
         return (await fs.stat(filePath)).mtimeMs;
     } catch (error) {
-        if ((error as NodeJS.ErrnoException).code == "ENOENT") return 0;
+        if (
+            (error as NodeJS.ErrnoException).code == "ENOENT" ||
+            isTransientFileAccessError(error)
+        )
+            return 0;
         throw error;
     }
 };
 
-const clearJobOutput = (outputDir: string) =>
-    Promise.all(
-        [
-            "output.m3u8",
-            "output.ts",
-            "output.ts.tmp",
-            "jasna-status.json",
-            "jasna-status.json.heartbeat",
-        ].map((name) => fs.rm(path.join(outputDir, name), { force: true })),
-    );
+const clearJobOutput = async (outputDir: string) => {
+    for (const name of [
+        "output.m3u8",
+        "output.ts",
+        "output.ts.tmp",
+        "jasna-status.json",
+        "jasna-status.json.heartbeat",
+    ]) {
+        await removeFileWithTransientRetry(path.join(outputDir, name));
+    }
+};
+
+const removeFileWithTransientRetry = async (filePath: string) => {
+    for (let attempt = 0; ; attempt++) {
+        try {
+            await fs.rm(filePath, { force: true });
+            return;
+        } catch (error) {
+            if (!isTransientFileAccessError(error) || attempt >= 9) throw error;
+            await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+    }
+};
 
 const readStatus = async (statusPath: string) => {
     try {
@@ -927,7 +958,7 @@ const readStatus = async (statusPath: string) => {
         if (
             error instanceof Error &&
             "code" in error &&
-            (error.code == "ENOENT" || error.code == "EBUSY")
+            (error.code == "ENOENT" || isTransientFileAccessError(error))
         ) {
             return undefined;
         }

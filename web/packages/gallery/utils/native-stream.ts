@@ -269,6 +269,7 @@ export const initiateGenerateHLS = async (
         body,
     });
     if (res.status == 503) throw new JasnaUnavailableError();
+    if (res.status == 502) throw new SourcePreparationError(await res.text());
     if (!res.ok)
         throw new Error(`Failed to write stream to ${url}: HTTP ${res.status}`);
 
@@ -278,6 +279,8 @@ export const initiateGenerateHLS = async (
 };
 
 export class JasnaUnavailableError extends Error {}
+
+export class SourcePreparationError extends Error {}
 
 export const readGenerateHLSProgress = async (
     _: Electron,

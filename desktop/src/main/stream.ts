@@ -338,7 +338,15 @@ const handleGenerateHLSWrite = async (
     let result: FFmpegGenerateHLSPlaylistAndSegmentsResult | undefined;
     try {
         log.info(`[hls-pipeline] preparing source for file ${fileID}`);
-        await input.prepare();
+        try {
+            await input.prepare();
+        } catch (error) {
+            log.warn(
+                `[hls-pipeline] source preparation failed for file ${fileID}`,
+                error,
+            );
+            return new Response(String(error), { status: 502 });
+        }
         log.info(`[hls-pipeline] source ready for file ${fileID}`);
 
         try {

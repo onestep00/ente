@@ -420,7 +420,9 @@ class DownloadManager {
         file: EnteFile,
         opts?: FileDownloadOpts,
     ): Promise<ReadableStream<Uint8Array> | null> {
-        const cachedURL = this.fileURLPromises.get(file.id);
+        const cachedURL = opts?.bypassObjectURLCache
+            ? undefined
+            : this.fileURLPromises.get(file.id);
         if (cachedURL) {
             try {
                 const url = await cachedURL;
@@ -779,6 +781,8 @@ interface FileDownloadOpts {
      * credentials to download files; those are always considered interactive.
      */
     background?: boolean;
+    /** Skip whole-file browser Blob promises that can block large jobs. */
+    bypassObjectURLCache?: boolean;
 }
 
 /**
