@@ -23,6 +23,10 @@ During development, you might find `yarn build:quick` helpful. It is a variant
 of `yarn build` that omits some steps to build a binary quicker, something that
 can be useful during development.
 
+For the verified Windows toolchain, commands, output paths, and Android build
+pitfalls used by the Jasna-enabled Photos clients, see
+[Windows client builds](../../docs/windows-client-build.md).
+
 ### postinstall
 
 When using native node modules (those written in C/C++), we need to ensure they

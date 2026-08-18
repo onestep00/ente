@@ -344,6 +344,9 @@ const createMainWindow = () => {
         webPreferences: {
             preload: path.join(__dirname, "preload.js"),
             sandbox: true,
+            // Stream recreation requests must be pulled while this window is
+            // hidden in the tray.
+            backgroundThrottling: false,
         },
         icon,
         // Set the window's position and size (if we have one saved).
@@ -445,6 +448,14 @@ const createMainWindow = () => {
     // in turn inform the renderer process.
     window.on("focus", () => window.webContents.send("mainWindowFocus"));
     window.on("blur", () => window.webContents.send("mainWindowBlur"));
+
+    // Renderer timers are throttled while the window is hidden in the tray.
+    // Drive lightweight background sync checks from the main process instead.
+    const backgroundSyncPulse = setInterval(
+        () => window.webContents.send("backgroundSyncPulse"),
+        60 * 1000,
+    );
+    window.once("closed", () => clearInterval(backgroundSyncPulse));
 
     return window;
 };

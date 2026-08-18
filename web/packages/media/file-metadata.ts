@@ -389,6 +389,14 @@ export interface FilePublicMagicMetadataData {
      * skip logic changes).
      */
     sv?: number;
+    /**
+     * A client-generated token requesting that a desktop client recreate this
+     * file's video stream. Desktop clients acknowledge the request by copying
+     * the token to {@link streamRecreateAck} after a successful upload.
+     */
+    streamRecreateRequest?: number;
+    /** The latest {@link streamRecreateRequest} completed by a desktop client. */
+    streamRecreateAck?: number;
 }
 
 /**
@@ -420,6 +428,8 @@ export const FilePublicMagicMetadataData = z.looseObject({
     lat: z.number().nullish().transform(nullToUndefined),
     long: z.number().nullish().transform(nullToUndefined),
     sv: z.number().nullish().transform(nullToUndefined),
+    streamRecreateRequest: z.number().nullish().transform(nullToUndefined),
+    streamRecreateAck: z.number().nullish().transform(nullToUndefined),
 });
 
 /**

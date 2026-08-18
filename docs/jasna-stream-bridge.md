@@ -9,6 +9,9 @@ Jasna's raw-frame HLS encoder command.
 The integration was verified with the official v0.10.0 release. No Jasna source
 patch or custom Jasna build is required.
 
+The reproducible Windows desktop and Android build commands are documented in
+[Windows client builds](windows-client-build.md).
+
 ## Managed installation
 
 On Windows x64, Ente installs the verified official Jasna v0.10.0 NVIDIA
@@ -92,6 +95,25 @@ is configured, the existing preview backfill queue selects previews with an
 absent or older generator and recreates them serially. The migration resumes
 across app restarts and does not require a server package change or bulk stream
 deletion.
+
+## Mobile recreation requests
+
+The Android **Recreate stream** action writes a monotonically increasing
+`streamRecreateRequest` token into the file's encrypted public magic metadata.
+Desktop pulls this metadata, places the matching forced recreation item at the
+front of its live queue, and writes `streamRecreateAck` only after the new
+stream has uploaded successfully. Repeated taps with an outstanding request do
+not create duplicate work. If the acknowledgement write fails after a completed
+upload, Desktop retries only the metadata acknowledgement during later syncs;
+it does not run Jasna again while that process remains active.
+
+Desktop's Electron main process emits a sync pulse every 60 seconds. The
+renderer has background throttling disabled for this window, so the incremental
+file pull continues while Ente is hidden in the system tray. Requests are also
+checked during startup, the ordinary five-minute full pull, and window-focus
+sync. Detection therefore normally takes at most 60 seconds plus the incremental
+pull duration while the PC is online. A currently active stream task is allowed
+to finish; the requested file is first among the remaining queued items.
 
 ## Temporary input boundary
 

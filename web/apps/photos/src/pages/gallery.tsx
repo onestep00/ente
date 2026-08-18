@@ -56,6 +56,7 @@ import { FullScreenDropZone } from "ente-gallery/components/FullScreenDropZone";
 import { type UploadTypeSelectorIntent } from "ente-gallery/components/Upload";
 import { useSaveGroups } from "ente-gallery/components/utils/save-groups";
 import { type FileViewerInitialSidebar } from "ente-gallery/components/viewer/FileViewer";
+import { videoProcessingSyncRemoteRecreateRequestsIfNeeded } from "ente-gallery/services/video";
 import { CollectionSubType, type Collection } from "ente-media/collection";
 import { type EnteFile } from "ente-media/file";
 import { ItemVisibility } from "ente-media/file-metadata";
@@ -515,6 +516,7 @@ const Page: React.FC = () => {
         const electron = globalThis.electron;
         let syncIntervalID: ReturnType<typeof setInterval> | undefined;
         let unsubscribeMainWindowFocus: (() => void) | undefined;
+        let isBackgroundSyncPulsePending = false;
 
         void (async () => {
             if (!haveMasterKeyInSession() || !(await savedAuthToken())) {
@@ -624,6 +626,23 @@ const Page: React.FC = () => {
                     remotePull({ silent: true });
                     void watcher.checkAccessibility();
                 });
+                electron.onBackgroundSyncPulse(() => {
+                    if (isBackgroundSyncPulsePending) return;
+                    isBackgroundSyncPulsePending = true;
+                    void (async () => {
+                        try {
+                            await remoteFilesPull();
+                            await videoProcessingSyncRemoteRecreateRequestsIfNeeded();
+                        } catch (e) {
+                            log.warn(
+                                "Background stream request sync failed",
+                                e,
+                            );
+                        } finally {
+                            isBackgroundSyncPulsePending = false;
+                        }
+                    })();
+                });
                 if (await shouldShowWhatsNew(electron)) showWhatsNew();
             }
         })();
@@ -631,6 +650,7 @@ const Page: React.FC = () => {
         return () => {
             clearInterval(syncIntervalID);
             unsubscribeMainWindowFocus?.();
+            electron?.onBackgroundSyncPulse(undefined);
         };
     }, []);
 

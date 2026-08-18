@@ -23,6 +23,7 @@ import "package:photos/models/metadata/common_keys.dart";
 import 'package:photos/models/selected_files.dart';
 import "package:photos/service_locator.dart";
 import 'package:photos/services/collections_service.dart';
+import "package:photos/services/desktop_stream_recreate_service.dart";
 import 'package:photos/services/hidden_service.dart';
 import "package:photos/services/local_authentication_service.dart";
 import "package:photos/services/video_preview_service.dart";
@@ -771,6 +772,7 @@ class FileAppBarState extends State<FileAppBar> {
   bool _shouldShowCreateStreamOption() {
     // Show "Create Stream" option for uploaded video files without streams
     return _ensureBasicRequirements() &&
+        VideoPreviewService.instance.isVideoStreamingEnabled &&
         !fileDataService.previewIds.containsKey(widget.file.uploadedFileID!);
   }
 
@@ -787,14 +789,17 @@ class FileAppBarState extends State<FileAppBar> {
         widget.file.isUploaded &&
         widget.file.fileSize != null &&
         (widget.file.pubMagicMetadata?.sv ?? 0) != 1 &&
-        widget.file.ownerID == userId &&
-        VideoPreviewService.instance.isVideoStreamingEnabled;
+        widget.file.ownerID == userId;
   }
 
   Future<void> _handleVideoStream(String streamType) async {
     try {
-      final bool wasAdded = await VideoPreviewService.instance
-          .addToManualQueue(widget.file, streamType);
+      final bool wasAdded = streamType == 'recreate'
+          ? await DesktopStreamRecreateService.instance.request(widget.file)
+          : await VideoPreviewService.instance.addToManualQueue(
+              widget.file,
+              streamType,
+            );
 
       if (!wasAdded) {
         // File was already in queue

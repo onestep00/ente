@@ -77,6 +77,8 @@ interface VideoProcessingQueueItem {
     forceRecreate?: boolean;
     /** Process before other queued live uploads and backfill items. */
     priority?: boolean;
+    /** Synced mobile request to acknowledge after successful recreation. */
+    remoteRecreateRequest?: number;
 }
 
 const idleWaitInitial = 10 * 1000; /* 10 sec */
@@ -98,6 +100,8 @@ const processingPipelineWidth = 2;
 class VideoState {
     /** Whether this desktop process has Jasna stream processing configured. */
     jasnaConfigured = false;
+    /** Completed remote requests awaiting a successful metadata acknowledgement. */
+    completedRemoteRecreateRequests = new Map<number, number>();
     /** Next index for a bounded, deterministic scan of existing previews. */
     jasnaMigrationCursor = 0;
     /**
@@ -770,7 +774,78 @@ export const videoProcessingSyncIfNeeded = async () => {
 
     await pullProcessedFileIDs();
 
+    await videoProcessingSyncRemoteRecreateRequestsIfNeeded();
+
     tickNow(); /* if not already ticking */
+};
+
+/** Queue synced mobile recreation requests ahead of normal desktop work. */
+export const videoProcessingSyncRemoteRecreateRequestsIfNeeded = async () => {
+    if (!isHLSGenerationSupported || !isHLSGenerationEnabled()) return;
+
+    const userID = ensureLocalUser().id;
+    const files = uniqueFilesByID(await savedCollectionFiles());
+    const pending = files.filter((file) => {
+        const metadata = file.pubMagicMetadata?.data;
+        const request = metadata?.streamRecreateRequest ?? 0;
+        const acknowledged = metadata?.streamRecreateAck ?? 0;
+        return (
+            file.ownerID == userID &&
+            file.metadata.fileType == FileType.video &&
+            request > acknowledged
+        );
+    });
+    const requested: EnteFile[] = [];
+    for (const file of pending) {
+        const request = file.pubMagicMetadata!.data.streamRecreateRequest!;
+        if (
+            (_state.completedRemoteRecreateRequests.get(file.id) ?? 0) >=
+            request
+        ) {
+            await acknowledgeRemoteRecreateRequest(file, request);
+        } else {
+            requested.push(file);
+        }
+    }
+    if (requested.length > 0) {
+        log.info(
+            `Queued ${requested.length} synced mobile stream recreation request(s)`,
+        );
+        enqueueVideoProcessingItems(
+            requested.map((file) => ({
+                file,
+                forceRecreate: true,
+                priority: true,
+                remoteRecreateRequest:
+                    file.pubMagicMetadata!.data.streamRecreateRequest,
+            })),
+        );
+    }
+};
+
+const acknowledgeRemoteRecreateRequest = async (
+    file: EnteFile,
+    request: number,
+) => {
+    try {
+        await updateFilePublicMagicMetadata(file, {
+            streamRecreateAck: request,
+        });
+        if (
+            (_state.completedRemoteRecreateRequests.get(file.id) ?? 0) <=
+            request
+        ) {
+            _state.completedRemoteRecreateRequests.delete(file.id);
+        }
+        log.info(
+            `Acknowledged synced mobile stream recreation for ${fileLogID(file)} | request=${request}`,
+        );
+    } catch (e) {
+        log.warn(
+            `Failed to acknowledge synced mobile stream recreation for ${fileLogID(file)}`,
+            e,
+        );
+    }
 };
 
 const enqueueVideoProcessingItems = (items: VideoProcessingQueueItem[]) => {
@@ -784,9 +859,24 @@ const enqueueVideoProcessingItems = (items: VideoProcessingQueueItem[]) => {
     let addedCount = 0;
     let updatedExisting = false;
     const priorityItems: VideoProcessingQueueItem[] = [];
+    const mergeRemoteRequest = (
+        target: VideoProcessingQueueItem,
+        source: VideoProcessingQueueItem,
+    ) => {
+        if (
+            source.remoteRecreateRequest !== undefined &&
+            source.remoteRecreateRequest > (target.remoteRecreateRequest ?? 0)
+        ) {
+            target.remoteRecreateRequest = source.remoteRecreateRequest;
+            target.file = source.file;
+            return true;
+        }
+        return false;
+    };
     for (const item of items) {
         const existing = queuedByID.get(item.file.id);
         if (existing) {
+            if (mergeRemoteRequest(existing, item)) updatedExisting = true;
             if (item.forceRecreate && !existing.forceRecreate) {
                 existing.forceRecreate = true;
                 updatedExisting = true;
@@ -810,6 +900,7 @@ const enqueueVideoProcessingItems = (items: VideoProcessingQueueItem[]) => {
             continue;
         }
         const active = _state.activeVideoItems.get(item.file.id);
+        if (active) mergeRemoteRequest(active, item);
         if (active && (!item.forceRecreate || active.forceRecreate)) {
             continue;
         }
@@ -1008,17 +1099,31 @@ const processQueue = async () => {
             _state.currentProgress = undefined;
         }
 
-        let task!: Promise<void>;
-        task = (async () => {
+        const task = (async () => {
             try {
                 await processQueueItem(item);
+                if (item.remoteRecreateRequest !== undefined) {
+                    _state.completedRemoteRecreateRequests.set(
+                        item.file.id,
+                        item.remoteRecreateRequest,
+                    );
+                    await acknowledgeRemoteRecreateRequest(
+                        item.file,
+                        item.remoteRecreateRequest,
+                    );
+                }
                 await markProcessedVideoFileID(item.file.id);
                 _state.idleWait = idleWaitInitial;
             } catch (e) {
                 log.error(`Failed to process video ${fileLogID(item.file)}`, e);
                 transientFailedFileIDs.add(item.file.id);
             } finally {
-                active.delete(task);
+                for (const [activeTask, activeItem] of active) {
+                    if (activeItem === item) {
+                        active.delete(activeTask);
+                        break;
+                    }
+                }
                 activeFileIDs.delete(item.file.id);
                 _state.activeVideoItems.delete(item.file.id);
                 _state.processingDone = (_state.processingDone ?? 0) + 1;

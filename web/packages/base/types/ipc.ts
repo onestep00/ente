@@ -180,6 +180,12 @@ export interface Electron {
     onMainWindowFocus: (cb: (() => void) | undefined) => void;
 
     /**
+     * Set or clear the callback invoked by the Electron main process once per
+     * minute while the app is running, including while it is hidden in tray.
+     */
+    onBackgroundSyncPulse: (cb: (() => void) | undefined) => void;
+
+    /**
      * Set or clear the callback {@link cb} to invoke whenever the app goes to
      * the background. More precisely, the callback gets invoked when the main
      * window blurs and the app is no longer focused.

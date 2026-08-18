@@ -32,6 +32,13 @@ Regenerate Dart bindings when Rust APIs change and keep generated code in `lib/s
 2. Install Rust along with `flutter_rust_bridge_codegen` via `cargo install flutter_rust_bridge_codegen`.
 3. Regenerate Rust bindings whenever native APIs shift using `flutter_rust_bridge_codegen generate`.
 
+On the Windows checkout at `C:\Users\jmg29\code\ente`, use the Puro Flutter
+binary at `C:\Users\jmg29\.puro\envs\ente-3328\flutter\bin\flutter.bat`.
+Before Android builds, set JDK 17 as `JAVA_HOME` and prepend both that JDK's
+`bin` and the Puro Flutter `bin` to `PATH`; `rive_native` needs to find
+`dart.exe` from CMake. Follow `docs/windows-client-build.md` for the verified
+commands and known Gradle constraints.
+
 ## Critical Practices
 - `dart format .` must run before you commit so the tree stays uniformly formatted.
 - Follow each edit with `flutter analyze` and resolve every warning or info message introduced by the change.

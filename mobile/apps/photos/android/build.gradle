@@ -10,6 +10,15 @@ allprojects {
         mavenCentral()
         // mavenLocal() // for FDroid
     }
+
+    configurations.configureEach {
+        // home_widget 0.8.0 requests glance-appwidget:1.+. New alpha releases
+        // require a newer compile SDK and AGP than this app supports.
+        resolutionStrategy.force(
+            "androidx.glance:glance:1.0.0",
+            "androidx.glance:glance-appwidget:1.0.0",
+        )
+    }
 }
 
 rootProject.buildDir = "../build"

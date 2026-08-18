@@ -10,6 +10,8 @@ const uploaderNameKey = "uploaderName";
 const widthKey = 'w';
 const heightKey = 'h';
 const streamVersionKey = 'sv';
+const streamRecreateRequestKey = 'streamRecreateRequest';
+const streamRecreateAckKey = 'streamRecreateAck';
 const mediaTypeKey = 'mediaType';
 const latKey = "lat";
 const longKey = "long";
@@ -57,6 +59,11 @@ class PubMagicMetadata {
   // If this is set, then the file is a streaming version of the original file.
   int? sv;
 
+  // A token written by mobile to request priority stream recreation on desktop,
+  // and the latest token successfully processed by desktop.
+  int? streamRecreateRequest;
+  int? streamRecreateAck;
+
   // ISO 8601 datetime without timezone. This contains the date and time of the photo in the original tz
   // where the photo was taken.
   String? dateTime;
@@ -95,6 +102,8 @@ class PubMagicMetadata {
     this.dateTime,
     this.offsetTime,
     this.sv,
+    this.streamRecreateRequest,
+    this.streamRecreateAck,
   });
 
   factory PubMagicMetadata.fromEncodedJson(String encodedJson) =>
@@ -123,8 +132,19 @@ class PubMagicMetadata {
       dateTime: map[dateTimeKey],
       offsetTime: map[offsetTimeKey],
       sv: safeParseInt(map[streamVersionKey], streamVersionKey),
+      streamRecreateRequest: safeParseInt(
+        map[streamRecreateRequestKey],
+        streamRecreateRequestKey,
+      ),
+      streamRecreateAck: safeParseInt(
+        map[streamRecreateAckKey],
+        streamRecreateAckKey,
+      ),
     );
   }
+
+  bool get hasPendingStreamRecreateRequest =>
+      (streamRecreateRequest ?? 0) > (streamRecreateAck ?? 0);
 
   static String? safeParseCaption(dynamic value) {
     if (value == null) return null;
