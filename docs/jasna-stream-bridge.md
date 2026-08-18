@@ -77,9 +77,9 @@ installed. A fresh Jasna version directory is handled independently.
   opened by FFmpeg for audio. No restored intermediate video is created.
 - H.264 is encoded once with NVIDIA NVENC. `multipass=fullres` is NVENC
   rate-control analysis within that encode.
-- VBR uses a 10 Mbps floor, targets 15 Mbps, and is capped at 20 Mbps with a
-  40 Mbit VBV buffer. The encoder uses preset p6, HQ tuning, CQ 19, temporal AQ,
-  three B-frames, B-frame references, and a 20-frame lookahead.
+- VBR uses a 4 Mbps floor, targets 6 Mbps, and is capped at 8 Mbps with a
+  16 Mbit VBV buffer. The encoder uses preset p7, HQ tuning, CQ 17, spatial and
+  temporal AQ, four B-frames, B-frame references, and a 32-frame lookahead.
 - Source dimensions are preserved. Source FPS is preserved through 60 FPS and
   clamped to 60 above that value. The GOP is one two-second HLS segment.
 - Audio is encoded as AAC 192 kbps.
@@ -90,7 +90,7 @@ installed. A fresh Jasna version directory is handled independently.
 
 ## Existing stream migration
 
-Generated playlist metadata records `generator: "jasna-ente-v1"`. When Jasna
+Generated playlist metadata records `generator: "jasna-ente-v4"`. When Jasna
 is configured, the existing preview backfill queue selects previews with an
 absent or older generator and recreates them serially. The migration resumes
 across app restarts and does not require a server package change or bulk stream

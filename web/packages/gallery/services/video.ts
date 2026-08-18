@@ -83,9 +83,9 @@ interface VideoProcessingQueueItem {
 
 const idleWaitInitial = 10 * 1000; /* 10 sec */
 const idleWaitMax = idleWaitInitial * 2 ** 6; /* 640 sec */
-const hlsTargetMinBitrate = 10000 * 1000;
-const hlsTargetMaxBitrate = 20000 * 1000;
-const jasnaStreamGenerator = "jasna-ente-v3";
+const hlsTargetMinBitrate = 4000 * 1000;
+const hlsTargetMaxBitrate = 8000 * 1000;
+const jasnaStreamGenerator = "jasna-ente-v4";
 const recreateStreamMinRatio = 0.5;
 const recreateSourceMinRatio = 0.8;
 const bitrateCapHeadroom = 1.3;

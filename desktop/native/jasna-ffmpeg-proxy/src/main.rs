@@ -481,6 +481,7 @@ fn replaced_option(option: &str) -> bool {
             | "-b_ref_mode"
             | "-profile:v"
             | "-spatial-aq"
+            | "-aq-strength"
             | "-temporal-aq"
             | "-rc-lookahead"
             | "-g"
@@ -499,7 +500,7 @@ fn replaced_option(option: &str) -> bool {
 fn option_pairs(job: &Job, gop: u64) -> Vec<String> {
     [
         ("-c:v", "h264_nvenc".to_owned()),
-        ("-preset", "p6".to_owned()),
+        ("-preset", "p7".to_owned()),
         ("-tune", "hq".to_owned()),
         ("-multipass", "fullres".to_owned()),
         ("-rc", "vbr".to_owned()),
@@ -507,12 +508,14 @@ fn option_pairs(job: &Job, gop: u64) -> Vec<String> {
         ("-minrate", job.min_bitrate.to_string()),
         ("-maxrate", job.max_bitrate.to_string()),
         ("-bufsize", (job.max_bitrate * 2).to_string()),
-        ("-cq", "19".to_owned()),
-        ("-bf", "3".to_owned()),
+        ("-cq", "17".to_owned()),
+        ("-bf", "4".to_owned()),
         ("-b_ref_mode", "middle".to_owned()),
         ("-profile:v", "high".to_owned()),
+        ("-spatial-aq", "1".to_owned()),
+        ("-aq-strength", "8".to_owned()),
         ("-temporal-aq", "1".to_owned()),
-        ("-rc-lookahead", "20".to_owned()),
+        ("-rc-lookahead", "32".to_owned()),
         ("-g", gop.to_string()),
         ("-keyint_min", gop.to_string()),
         ("-sc_threshold", "0".to_owned()),
@@ -577,9 +580,9 @@ mod tests {
             duration_seconds: 10.0,
             source_fps: Some(120.0),
             segment_duration: 2.0,
-            min_bitrate: 10_000_000,
-            target_bitrate: 15_000_000,
-            max_bitrate: 20_000_000,
+            min_bitrate: 4_000_000,
+            target_bitrate: 6_000_000,
+            max_bitrate: 8_000_000,
             max_fps: 60,
         }
     }
@@ -639,10 +642,16 @@ mod tests {
     #[test]
     fn rewrites_jasna_stream_to_ente_hls() {
         let result = rewrite_streaming_args(&args("120/1"), &job()).unwrap();
-        assert!(has_pair(&result, "-preset", "p6"));
-        assert!(has_pair(&result, "-b:v", "15000000"));
-        assert!(has_pair(&result, "-minrate", "10000000"));
-        assert!(has_pair(&result, "-maxrate", "20000000"));
+        assert!(has_pair(&result, "-preset", "p7"));
+        assert!(has_pair(&result, "-b:v", "6000000"));
+        assert!(has_pair(&result, "-minrate", "4000000"));
+        assert!(has_pair(&result, "-maxrate", "8000000"));
+        assert!(has_pair(&result, "-cq", "17"));
+        assert!(has_pair(&result, "-bf", "4"));
+        assert!(has_pair(&result, "-spatial-aq", "1"));
+        assert!(has_pair(&result, "-aq-strength", "8"));
+        assert!(has_pair(&result, "-temporal-aq", "1"));
+        assert!(has_pair(&result, "-rc-lookahead", "32"));
         assert!(has_pair(&result, "-g", "120"));
         assert!(has_pair(&result, "-vf", "setsar=1/1,fps=60/1"));
         assert!(has_pair(&result, "-c:a", "aac"));

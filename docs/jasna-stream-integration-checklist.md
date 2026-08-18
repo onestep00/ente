@@ -27,10 +27,10 @@
 ## Encoding and HLS
 
 - [x] Encode restored video exactly once.
-- [x] Use NVIDIA NVENC p6/HQ/full-resolution multipass and deterministic GOPs.
+- [x] Use NVIDIA NVENC p7/HQ/full-resolution multipass and deterministic GOPs.
 - [x] Preserve source FPS up to a 60 FPS ceiling.
 - [x] Preserve source dimensions.
-- [x] Use 10/15/20 Mbps minimum/target/maximum VBR.
+- [x] Use 4/6/8 Mbps minimum/target/maximum VBR.
 - [x] Encode audio as AAC 192 kbps.
 - [x] Generate AES-128 encrypted single-file MPEG-TS HLS directly from Jasna.
 - [x] Remove FFmpeg's unreferenced `output.ts.tmp` artifact.

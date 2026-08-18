@@ -46,10 +46,10 @@ const preferredHardwareEncoders = [
 const vaapiDeviceEnvVar = "ENTE_FFMPEG_VAAPI_DEVICE";
 const defaultVaapiDevice = "/dev/dri/renderD128";
 const ffmpegProgressUpdateIntervalMs = 2000;
-const hlsTargetBitrateKbps = 15000;
-const hlsMinBitrateKbps = 10000;
-const hlsMaxBitrateKbps = 20000;
-const hlsBufsizeKbps = 40000;
+const hlsTargetBitrateKbps = 6000;
+const hlsMinBitrateKbps = 4000;
+const hlsMaxBitrateKbps = 8000;
+const hlsBufsizeKbps = 16000;
 const hlsMaxFps = 60;
 const hlsGopSeconds = 2;
 
@@ -464,7 +464,7 @@ export interface FFmpegGenerateHLSPlaylistAndSegmentsResult {
     dimensions: { width: number; height: number };
     videoSize: number;
     videoObjectID: string;
-    generator: "ente-ffmpeg-v1" | "jasna-ente-v3";
+    generator: "ente-ffmpeg-v1" | "jasna-ente-v4";
 }
 
 /**
@@ -779,7 +779,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
     // - `-c:v h264_qsv` uses Intel Quick Sync when available.
     // - `-c:v h264_nvenc` uses NVIDIA NVENC when available.
     //
-    // - VBR targets 15 Mbps within a 10-20 Mbps VBV window.
+    // - VBR targets 6 Mbps within a 4-8 Mbps VBV window.
     //
     // - `-bufsize` is set to 2x maxrate for smooth rate control.
     //
@@ -976,7 +976,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
         dimensions,
         videoSize,
         videoObjectID,
-        generator: isJasnaConfigured() ? "jasna-ente-v3" : "ente-ffmpeg-v1",
+        generator: isJasnaConfigured() ? "jasna-ente-v4" : "ente-ffmpeg-v1",
     };
 };
 

@@ -35,7 +35,9 @@ const managedJasnaArgs = [
     "--compile-basicvsrpp",
     "--enable-crossfade",
     "--detection-model",
-    "rfdetr-v6-large",
+    "rfdetr-v6",
+    "--detection-score-threshold",
+    "0.15",
     "--secondary-restoration",
     "unet-4x",
 ] as const;
@@ -120,13 +122,6 @@ const managedAssets = [
 ] as const satisfies readonly ManagedAsset[];
 const managedReleaseURL = `https://github.com/Kruk2/jasna/releases/download/${managedRelease}`;
 const managedInstalledSize = 8_778_018_427;
-const managedDetectionModel: ManagedAsset = {
-    name: "rfdetr-v6-large.onnx",
-    size: 149_272_820,
-    sha256: "e8c1af4b1d7be2b99ef21325a8140b7bea15132df0b25cd30d32128bcd8cd644",
-    downloadURL:
-        "https://github.com/Kruk2/jasna/releases/download/0.1/rfdetr-v6-large.onnx",
-};
 
 export const initializeJasnaWorker = (paths: JasnaWorkerPaths) => {
     workerPaths = paths;
@@ -223,27 +218,6 @@ const downloadAsset = async (destination: string, asset: ManagedAsset) => {
         throw new Error(`Checksum mismatch for ${asset.name}`);
     await fs.rename(partial, destination);
     log.info(`Downloaded and verified managed Jasna asset ${asset.name}`);
-};
-
-const ensureManagedDetectionModel = async (jasnaPath: string) => {
-    const weightsDirectory = path.join(
-        path.dirname(jasnaPath),
-        "model_weights",
-    );
-    const destination = path.join(weightsDirectory, managedDetectionModel.name);
-    await fs.mkdir(weightsDirectory, { recursive: true });
-    let valid = false;
-    try {
-        const stat = await fs.stat(destination);
-        valid =
-            stat.size == managedDetectionModel.size &&
-            (await fileHash(destination)) == managedDetectionModel.sha256;
-    } catch (error) {
-        if ((error as NodeJS.ErrnoException).code != "ENOENT") throw error;
-    }
-    if (valid) return;
-    await fs.rm(destination, { force: true });
-    await downloadAsset(destination, managedDetectionModel);
 };
 
 const installManagedRelease = async () => {
@@ -490,7 +464,6 @@ const startWorkerOnce = async () => {
         });
     }
     await ensureInboundBlocked(executable);
-    await ensureManagedDetectionModel(executable);
     const { jobPath, realFFmpegPath } = await installProxy(executable);
     const port = await reservePort();
     const worker = spawn(
@@ -710,9 +683,9 @@ const runJasnaHLSAttempt = async (job: JasnaJob): Promise<JobCompletion> => {
         durationSeconds: job.durationSeconds,
         sourceFps: job.fps,
         segmentDuration: 2,
-        minBitrate: 10_000_000,
-        targetBitrate: 15_000_000,
-        maxBitrate: 20_000_000,
+        minBitrate: 4_000_000,
+        targetBitrate: 6_000_000,
+        maxBitrate: 8_000_000,
         maxFps: 60,
     });
     try {
