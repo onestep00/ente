@@ -25,8 +25,6 @@ const maximumJobTimeoutMs = 24 * 60 * 60 * 1000;
 const maximumJobAttempts = 2;
 
 const managedJasnaArgs = [
-    "--batch-size",
-    "4",
     "--max-clip-size",
     "360",
     "--temporal-overlap",
@@ -40,6 +38,13 @@ const managedJasnaArgs = [
     "0.15",
     "--secondary-restoration",
     "unet-4x",
+] as const;
+
+const dynamicJasnaArgs = [
+    "--primary-clip-batch-size",
+    "auto",
+    "--stream-workers",
+    "auto",
 ] as const;
 
 interface JasnaWorkerPaths {
@@ -90,12 +95,13 @@ let child: ChildProcessWithoutNullStreams | undefined;
 let workerPort: number | undefined;
 let readyPromise: Promise<void> | undefined;
 let startingPromise: Promise<void> | undefined;
-let jobTail = Promise.resolve();
+let legacyJobTail = Promise.resolve();
 let installPromise: Promise<string> | undefined;
 let resolvedExecutable: string | undefined;
 let installRetryAfter = 0;
 let lastInstallError: Error | undefined;
 let firewalledExecutable: string | undefined;
+let workerSupportsDynamicJobs = false;
 
 interface JobCompletion {
     recoveredFromOutput: boolean;
@@ -357,9 +363,15 @@ const resolveExecutable = async () => {
     return resolvedExecutable;
 };
 
-const configuredArgs = () => {
+const configuredArgs = (supportsDynamicJobs: boolean) => {
     const raw = process.env[jasnaArgsEnvVar]?.trim();
-    if (!raw) return [...managedJasnaArgs];
+    const defaults = [
+        "--batch-size",
+        supportsDynamicJobs ? "8" : "4",
+        ...managedJasnaArgs,
+        ...(supportsDynamicJobs ? dynamicJasnaArgs : []),
+    ];
+    if (!raw) return defaults;
     const parsed: unknown = JSON.parse(raw);
     if (
         !Array.isArray(parsed) ||
@@ -377,7 +389,27 @@ const configuredArgs = () => {
     const conflict = parsed.find((arg) => enteOwned.has(arg));
     if (conflict)
         throw new Error(`${jasnaArgsEnvVar} cannot override ${conflict}`);
-    return [...managedJasnaArgs, ...parsed];
+    return [...defaults, ...parsed];
+};
+
+const supportsDynamicJobs = async (executable: string) => {
+    try {
+        const { stdout } = await execFileAsync(executable, ["--help"], {
+            timeout: 30_000,
+            windowsHide: true,
+            maxBuffer: 4 * 1024 * 1024,
+        });
+        return (
+            stdout.includes("--stream-workers") &&
+            stdout.includes("--primary-clip-batch-size")
+        );
+    } catch (error) {
+        log.warn(
+            "Could not inspect Jasna capabilities; using legacy mode",
+            error,
+        );
+        return false;
+    }
 };
 
 const installProxy = async (jasnaPath: string) => {
@@ -393,6 +425,8 @@ const installProxy = async (jasnaPath: string) => {
         fs.access(ffmpegPath),
         fs.mkdir(paths.runtimeDirectory, { recursive: true }),
     ]);
+    const jobsDirectory = path.join(paths.runtimeDirectory, "jobs");
+    await fs.mkdir(jobsDirectory, { recursive: true });
     const [currentHash, proxyHash, manifest] = await Promise.all([
         fileHash(ffmpegPath),
         fileHash(paths.proxyPath),
@@ -410,10 +444,7 @@ const installProxy = async (jasnaPath: string) => {
         version: 1,
         installedProxyHash: proxyHash,
     } satisfies ProxyInstallManifest);
-    return {
-        jobPath: path.join(paths.runtimeDirectory, "current-job.json"),
-        realFFmpegPath,
-    };
+    return { jobsDirectory, realFFmpegPath };
 };
 
 const fileHash = async (filePath: string) =>
@@ -464,7 +495,8 @@ const startWorkerOnce = async () => {
         });
     }
     await ensureInboundBlocked(executable);
-    const { jobPath, realFFmpegPath } = await installProxy(executable);
+    workerSupportsDynamicJobs = await supportsDynamicJobs(executable);
+    const { jobsDirectory, realFFmpegPath } = await installProxy(executable);
     const port = await reservePort();
     const worker = spawn(
         workerPaths!.proxyPath,
@@ -473,7 +505,7 @@ const startWorkerOnce = async () => {
             process.pid.toString(),
             "--",
             executable,
-            ...configuredArgs(),
+            ...configuredArgs(workerSupportsDynamicJobs),
             "--stream",
             "--no-browser",
             "--stream-port",
@@ -489,7 +521,7 @@ const startWorkerOnce = async () => {
             stdio: ["pipe", "pipe", "pipe"],
             env: {
                 ...process.env,
-                ENTE_JASNA_FFMPEG_JOB: jobPath,
+                ENTE_JASNA_FFMPEG_JOB: jobsDirectory,
                 ENTE_JASNA_REAL_FFMPEG: realFFmpegPath,
             },
         },
@@ -509,6 +541,7 @@ const startWorkerOnce = async () => {
                 child = undefined;
                 workerPort = undefined;
                 readyPromise = undefined;
+                workerSupportsDynamicJobs = false;
             }
             reject(new Error(`Jasna exited (code ${code}, signal ${signal})`));
         });
@@ -586,6 +619,7 @@ const stopWorker = async () => {
     workerPort = undefined;
     readyPromise = undefined;
     startingPromise = undefined;
+    workerSupportsDynamicJobs = false;
     if (!worker || worker.exitCode !== null) return;
     const exited = new Promise<void>((resolve) => worker.once("exit", resolve));
     worker.kill();
@@ -615,39 +649,44 @@ const waitUntilReady = async (port: number) => {
     throw new Error("Timed out waiting for Jasna to start");
 };
 
-export const runJasnaHLSJob = async (job: JasnaJob) => {
-    const previous = jobTail;
-    let release!: () => void;
-    jobTail = new Promise<void>((resolve) => (release = resolve));
+const runJasnaHLSJobUnlocked = async (job: JasnaJob) => {
     log.info(`Jasna HLS queued for file ${job.fileID}`);
-    await previous;
     log.info(`Jasna HLS started for file ${job.fileID}`);
-    try {
-        let lastError: unknown;
-        for (let attempt = 1; attempt <= maximumJobAttempts; attempt++) {
-            try {
-                const completion = await runJasnaHLSAttempt(job);
-                if (completion.recoveredFromOutput) {
-                    log.warn(
-                        "Jasna FFmpeg completed without publishing status; keeping the ready worker",
-                    );
-                }
-                return;
-            } catch (error) {
-                lastError = error;
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= maximumJobAttempts; attempt++) {
+        try {
+            const completion = await runJasnaHLSAttempt(job);
+            if (completion.recoveredFromOutput) {
                 log.warn(
-                    `Jasna HLS attempt ${attempt}/${maximumJobAttempts} failed`,
-                    error,
+                    "Jasna FFmpeg completed without publishing status; keeping the ready worker",
                 );
-                await stopWorker();
-                if (String(error).includes("ENTE_JASNA_UNAVAILABLE"))
-                    throw error;
-                if (attempt < maximumJobAttempts) {
-                    await clearJobOutput(job.outputDir);
-                }
             }
+            return;
+        } catch (error) {
+            lastError = error;
+            log.warn(
+                `Jasna HLS attempt ${attempt}/${maximumJobAttempts} failed`,
+                error,
+            );
+            if (!workerSupportsDynamicJobs) await stopWorker();
+            if (String(error).includes("ENTE_JASNA_UNAVAILABLE")) throw error;
+            if (attempt < maximumJobAttempts)
+                await clearJobOutput(job.outputDir);
         }
-        throw lastError;
+    }
+    throw lastError;
+};
+
+export const runJasnaHLSJob = async (job: JasnaJob) => {
+    await startWorker();
+    if (workerSupportsDynamicJobs) return runJasnaHLSJobUnlocked(job);
+
+    const previous = legacyJobTail;
+    let release!: () => void;
+    legacyJobTail = new Promise<void>((resolve) => (release = resolve));
+    await previous;
+    try {
+        return await runJasnaHLSJobUnlocked(job);
     } finally {
         release();
     }
@@ -668,7 +707,9 @@ const runJasnaHLSAttempt = async (job: JasnaJob): Promise<JobCompletion> => {
     if (!port || !runtimeDirectory || !activeWorker)
         throw new Error("Jasna did not start");
     const jobId = randomUUID();
-    const jobPath = path.join(runtimeDirectory, "current-job.json");
+    const jobsDirectory = path.join(runtimeDirectory, "jobs");
+    await fs.mkdir(jobsDirectory, { recursive: true });
+    const jobPath = path.join(jobsDirectory, `${jobId}.json`);
     const statusPath = path.join(job.outputDir, "jasna-status.json");
     const heartbeatPath = `${statusPath}.heartbeat`;
     const controller = new AbortController();
@@ -708,7 +749,7 @@ const runJasnaHLSAttempt = async (job: JasnaJob): Promise<JobCompletion> => {
         const loadFailure = fetch(`http://127.0.0.1:${port}/api/load`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ path: job.inputPath }),
+            body: JSON.stringify({ path: job.inputPath, jobId }),
             signal: controller.signal,
         }).then(async (response) => {
             if (!response.ok)
@@ -727,7 +768,7 @@ const runJasnaHLSAttempt = async (job: JasnaJob): Promise<JobCompletion> => {
             removeExitListener();
         }
     } catch (error) {
-        await stopCurrentJob(port);
+        await stopCurrentJob(port, jobId);
         throw error;
     } finally {
         controller.abort();
@@ -939,10 +980,12 @@ const readStatus = async (statusPath: string) => {
     }
 };
 
-const stopCurrentJob = async (port: number) => {
+const stopCurrentJob = async (port: number, jobId: string) => {
     try {
         await fetch(`http://127.0.0.1:${port}/api/stop`, {
             method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jobId }),
             signal: AbortSignal.timeout(5000),
         });
     } catch (error) {

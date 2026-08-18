@@ -67,25 +67,14 @@ fn run() -> Result<i32, String> {
         return run_jasna_child(&args[1..]);
     }
     let real_ffmpeg = real_ffmpeg_path()?;
-    let Some(job_path) = env::var_os(JOB_ENV) else {
+    let Some(job_location) = env::var_os(JOB_ENV) else {
         return run_passthrough(&real_ffmpeg, &args);
     };
-    let job_path = PathBuf::from(job_path);
-    if !job_path.is_file() {
-        if is_streaming_invocation(&args) {
-            return Err("refusing Jasna streaming without an active Ente job".to_owned());
-        }
-        return run_passthrough(&real_ffmpeg, &args);
-    }
-
-    let job: Job =
-        serde_json::from_slice(&fs::read(&job_path).map_err(|error| format!("read job: {error}"))?)
-            .map_err(|error| format!("parse job: {error}"))?;
-    validate_job(&job)?;
-
     if !is_streaming_invocation(&args) {
         return run_passthrough(&real_ffmpeg, &args);
     }
+    let job_location = PathBuf::from(job_location);
+    let job = select_job(&job_location, &args)?;
     if !input_matches(&args, &job.input_path) {
         return fail_job(&job, "FFmpeg input does not match the active Ente job");
     }
@@ -138,6 +127,68 @@ fn run() -> Result<i32, String> {
         )?;
         Ok(code)
     }
+}
+
+fn read_job(path: &Path) -> Result<Job, String> {
+    let job: Job = serde_json::from_slice(
+        &fs::read(path).map_err(|error| format!("read job {}: {error}", path.display()))?,
+    )
+    .map_err(|error| format!("parse job {}: {error}", path.display()))?;
+    validate_job(&job)?;
+    Ok(job)
+}
+
+fn select_job(location: &Path, args: &[String]) -> Result<Job, String> {
+    if location.is_file() {
+        return read_job(location);
+    }
+    if !location.is_dir() {
+        return Err("refusing Jasna streaming without an active Ente job".to_owned());
+    }
+
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(location)
+        .map_err(|error| format!("read jobs directory {}: {error}", location.display()))?
+    {
+        let entry = entry.map_err(|error| format!("read jobs directory entry: {error}"))?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let job = read_job(&path)?;
+        if input_matches(args, &job.input_path) {
+            candidates.push(job);
+        }
+    }
+
+    if let Some(index) = candidates
+        .iter()
+        .position(|job| invocation_mentions_job(args, job))
+    {
+        return Ok(candidates.swap_remove(index));
+    }
+    match candidates.len() {
+        1 => Ok(candidates.pop().unwrap()),
+        0 => Err("no active Ente job matches the Jasna FFmpeg input".to_owned()),
+        _ => Err("multiple active Ente jobs match the Jasna FFmpeg input".to_owned()),
+    }
+}
+
+fn invocation_mentions_job(args: &[String], job: &Job) -> bool {
+    let safe_id: String = job
+        .job_id
+        .chars()
+        .take(64)
+        .map(|value| {
+            if value.is_ascii_alphanumeric() || value == '-' || value == '_' {
+                value
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    args.iter()
+        .any(|arg| arg.contains(&job.job_id) || arg.contains(&safe_id))
 }
 
 fn heartbeat_path(job: &Job) -> PathBuf {
@@ -676,5 +727,25 @@ mod tests {
         assert!(has_pair(&result, "-r", "25.000000"));
         assert!(has_pair(&result, "-g", "50"));
         assert!(has_pair(&result, "-vf", "setsar=1/1"));
+    }
+
+    #[test]
+    fn matches_job_id_embedded_in_jasna_temp_path() {
+        let mut selected = job();
+        selected.job_id = "a10d7c88-43a3-4c64-8d8a-1ca878b54eb2".to_owned();
+        let invocation = vec![
+            r"C:\Temp\jasna_hls_a10d7c88-43a3-4c64-8d8a-1ca878b54eb2_x\stream.m3u8".to_owned(),
+        ];
+
+        assert!(invocation_mentions_job(&invocation, &selected));
+    }
+
+    #[test]
+    fn sanitizes_job_id_when_matching_temp_path() {
+        let mut selected = job();
+        selected.job_id = "job/unsafe".to_owned();
+        let invocation = vec![r"C:\Temp\jasna_hls_job_unsafe_x\stream.m3u8".to_owned()];
+
+        assert!(invocation_mentions_job(&invocation, &selected));
     }
 }
