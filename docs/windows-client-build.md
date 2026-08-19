@@ -63,6 +63,28 @@ Do not substitute the debug keystore or an unrelated repository key.
 
 ## Desktop Photos with Jasna
 
+Use the single Windows NSIS build script for a release candidate. It performs
+the fixed dependency installation, restores the official wasm-pack binary when
+the npm package hook is broken, rebuilds the WebAssembly and Photos renderer,
+packages the main process, and asserts that the packaged FFmpeg executable is
+present.
+
+```powershell
+Set-Location "$Repo\desktop"
+.\scripts\build-windows-nsis.ps1
+```
+
+The output is `C:\Users\jmg29\builds\ente-nsis`. Do not install a package
+unless `win-unpacked\resources\app.asar.unpacked\node_modules\ffmpeg-static\ffmpeg.exe`
+exists; the script checks this automatically.
+
+The script deliberately uses `web` dependency installation with
+`--ignore-scripts`: the locked `wasm-pack 0.14.0` npm hook references the
+repository location before its move and fails with HTTP 404. It then downloads
+and caches the matching official Windows executable under
+`%LOCALAPPDATA%\ente-build-tools\wasm-pack\v0.14.0`. The source tree and lock
+file remain unchanged.
+
 The Jasna desktop package records its private release line, upstream base and
 private revision as `2.0.0-ente-1.7.23-beta.jasna.N`. The current package
 version is `2.0.0-ente-1.7.23-beta.jasna.2`: it is above public `1.x`
@@ -74,6 +96,23 @@ subsequent private releases.
 Use the package scripts so `_ENTE_IS_DESKTOP=1` is present while Next.js builds
 the renderer. A plain `yarn build:photos` does not reproduce that desktop build
 environment.
+
+After dependency installation, confirm that `ffmpeg-static` has downloaded its
+Windows binary before packaging:
+
+```powershell
+Get-Item "$Repo\desktop\node_modules\ffmpeg-static\ffmpeg.exe"
+```
+
+The Electron Builder `beforeBuild` hook repairs a missing binary by invoking
+the package installer and fails the package build if the binary remains absent.
+If the dependency install itself was interrupted, run its installer explicitly
+before restarting the documented build sequence:
+
+```powershell
+Set-Location "$Repo\desktop"
+node .\node_modules\ffmpeg-static\install.js
+```
 
 The required order for TypeScript-only desktop changes is `tsc` (emit) and then
 Electron Builder. `tsc --noEmit` only checks types and does not update

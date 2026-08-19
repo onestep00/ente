@@ -10,19 +10,31 @@
 
 모든 명령은 `C:\Users\jmg29\code\ente\desktop`에서 PowerShell로 실행한다.
 
-1. 의존성을 고정 설치한다.
+1. Windows NSIS 설치본은 아래 단일 스크립트로 빌드한다. 이 스크립트는
+   의존성 고정 설치, 공식 `wasm-pack` 복구, renderer·main 빌드, FFmpeg 포함
+   검증과 NSIS 패키징을 순서대로 수행한다.
+
+   ```powershell
+   .\scripts\build-windows-nsis.ps1
+   ```
+
+2. 개별 단계가 필요할 때만 의존성을 고정 설치한다.
 
    ```powershell
    npx --yes yarn@1.22.22 install --frozen-lockfile
    ```
 
-2. `web/`가 변경된 경우 renderer를 먼저 다시 빌드한다.
+   설치 뒤에는 `desktop\node_modules\ffmpeg-static\ffmpeg.exe`가 있어야
+   한다. Electron Builder의 `beforeBuild` 훅은 누락 시 패키지 설치기를 한 번
+   실행하고, 복구하지 못하면 패키징을 실패시킨다.
+
+3. `web/`가 변경된 경우 renderer를 먼저 다시 빌드한다.
 
    ```powershell
    npx --yes yarn@1.22.22 build-renderer
    ```
 
-3. `desktop/src/` TypeScript 변경은 emit 빌드를 실행한다.
+4. `desktop/src/` TypeScript 변경은 emit 빌드를 실행한다.
 
    ```powershell
    .\node_modules\.bin\tsc.cmd
@@ -32,7 +44,7 @@
    않으므로 그 명령만 실행한 뒤 Electron Builder를 호출하면 이전 소스가
    패키징된다.
 
-4. 설치·업데이트 검증이 필요한 경우 NSIS를 사용한다.
+5. 설치·업데이트 검증이 필요한 경우 NSIS를 사용한다.
 
    ```powershell
    .\node_modules\.bin\electron-builder.cmd --win nsis --x64 `
@@ -45,7 +57,7 @@
    `ente-nsis\win-unpacked\ente.exe`이다. NSIS 패키지는
    `resources\app-update.yml`을 포함한다.
 
-5. 빠른 renderer smoke test만 필요한 경우 출력 디렉터리를 별도로 지정한
+6. 빠른 renderer smoke test만 필요한 경우 출력 디렉터리를 별도로 지정한
    `--dir` 패키지를 사용할 수 있다.
 
    ```powershell
@@ -60,7 +72,7 @@
    안전하게 기록만 되는지 확인한다. 실제 설치·업데이트 검증에는 NSIS를
    사용한다.
 
-6. 빌드 후에는 다음을 순서대로 확인한다.
+7. 빌드 후에는 다음을 순서대로 확인한다.
 
    ```powershell
    .\node_modules\.bin\tsc.cmd --noEmit

@@ -1,5 +1,37 @@
 const fsp = require("fs/promises");
+const { execFile } = require("child_process");
+const { promisify } = require("util");
 const { buildJasnaProxy } = require("./jasnaProxy");
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * Ensure Electron Builder can package the native ffmpeg-static binary.
+ *
+ * Yarn can finish successfully while the module's download hook leaves the
+ * executable absent. Repair it with the module's own installer and require a
+ * successful access check before packaging; shipping an application without
+ * this file makes every stream-generation request fail at process spawn time.
+ */
+const ensureFfmpegStatic = async (appDir) => {
+    const ffmpegPath = require("ffmpeg-static");
+    if (!ffmpegPath)
+        throw new Error("ffmpeg-static does not support this build platform");
+
+    try {
+        await fsp.access(ffmpegPath);
+    } catch {
+        console.warn(
+            "ffmpeg-static binary is missing; running its package installer",
+        );
+        await execFileAsync(
+            process.execPath,
+            [require.resolve("ffmpeg-static/install.js")],
+            { cwd: appDir },
+        );
+        await fsp.access(ffmpegPath);
+    }
+};
 
 /**
  * This hook is invoked during the initial build (e.g. when triggered by "yarn
@@ -31,6 +63,10 @@ const { buildJasnaProxy } = require("./jasnaProxy");
 module.exports = async (context) => {
     const { appDir, platform, arch } = context;
 
+    // Validate external media tooling first, before compiling the proxy. This
+    // fails quickly on a broken dependency install and avoids unnecessary Rust
+    // work when a usable Desktop package cannot be produced.
+    await ensureFfmpegStatic(appDir);
     await buildJasnaProxy(appDir, platform.nodeName, arch);
 
     // The arch used by Electron Builder is not the same as the arch used by

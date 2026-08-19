@@ -422,26 +422,30 @@ const execFFmpegWithProgress = async (
         if (reportProgress) reportProgress(0);
 
         let buffer = "";
-        child.stdout.setEncoding("utf8");
-        child.stdout.on("data", (chunk: string) => {
-            buffer += chunk;
-            const lines = buffer.split(/\r?\n/);
-            buffer = lines.pop() ?? "";
-            for (const rawLine of lines) {
-                const line = rawLine.trim();
-                if (!line || !reportProgress || !durationSeconds) continue;
-                const outTimeSeconds = parseProgressOutTimeSeconds(line);
-                if (outTimeSeconds !== undefined) {
-                    reportProgress(outTimeSeconds / durationSeconds);
-                    continue;
+        if (child.stdout) {
+            child.stdout.setEncoding("utf8");
+            child.stdout.on("data", (chunk: string) => {
+                buffer += chunk;
+                const lines = buffer.split(/\r?\n/);
+                buffer = lines.pop() ?? "";
+                for (const rawLine of lines) {
+                    const line = rawLine.trim();
+                    if (!line || !reportProgress || !durationSeconds) continue;
+                    const outTimeSeconds = parseProgressOutTimeSeconds(line);
+                    if (outTimeSeconds !== undefined) {
+                        reportProgress(outTimeSeconds / durationSeconds);
+                        continue;
+                    }
+                    if (line.startsWith("progress=") && line.includes("end")) {
+                        reportProgress(1);
+                    }
                 }
-                if (line.startsWith("progress=") && line.includes("end")) {
-                    reportProgress(1);
-                }
-            }
-        });
+            });
+        }
 
-        child.stderr.pipe(stderrStream);
+        if (child.stderr) {
+            child.stderr.pipe(stderrStream);
+        }
 
         child.on("error", (e: Error) => {
             stderrStream.close();
