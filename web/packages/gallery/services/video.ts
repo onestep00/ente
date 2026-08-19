@@ -741,13 +741,17 @@ export const videoPrunePermanentlyDeletedFileIDsIfNeeded = async (
 };
 
 /**
- * If video processing is enabled, trigger a pull from remote and then proceed
- * with any subsequent backfill queue processing of pending videos.
+ * Trigger the desktop video-processing sync after a remote pull.
+ *
+ * Automatic processing and the backfill queue require the HLS preference to be
+ * enabled. Explicit recreation requests received from a mobile client do not:
+ * they are user initiated and must be handled by a synced desktop client even
+ * when automatic HLS generation is disabled.
  *
  * This function is intended to be called during a full remote pull (See: [Note:
- * Remote pull]). It is a no-op if video processing is not enabled or eligible
- * on this device. Otherwise it pulls the list of already processed file IDs
- * with remote.
+ * Remote pull]). It is a no-op on non-desktop clients. When automatic HLS
+ * generation is enabled, it also pulls the list of already processed file IDs
+ * from remote.
  *
  * At this point it also triggers processing of the backfill (if needed), but
  * doesn't wait for it to complete (which might take a time for big libraries).
@@ -767,21 +771,26 @@ export const videoProcessingSyncIfNeeded = async () => {
     // the app's session, without waiting for the next sync to happen.
     _state.haveSyncedOnce = true;
 
-    if (!isHLSGenerationEnabled()) return;
+    if (isHLSGenerationEnabled()) {
+        _state.jasnaConfigured =
+            await isJasnaStreamProcessingConfigured(ensureElectron());
 
-    _state.jasnaConfigured =
-        await isJasnaStreamProcessingConfigured(ensureElectron());
-
-    await pullProcessedFileIDs();
+        await pullProcessedFileIDs();
+    }
 
     await videoProcessingSyncRemoteRecreateRequestsIfNeeded();
 
-    tickNow(); /* if not already ticking */
+    if (isHLSGenerationEnabled()) tickNow(); /* if not already ticking */
 };
 
-/** Queue synced mobile recreation requests ahead of normal desktop work. */
+/**
+ * Queue synced mobile recreation requests ahead of normal desktop work.
+ *
+ * Unlike automatic HLS generation, these explicit requests are independent of
+ * the desktop HLS preference.
+ */
 export const videoProcessingSyncRemoteRecreateRequestsIfNeeded = async () => {
-    if (!isHLSGenerationSupported || !isHLSGenerationEnabled()) return;
+    if (!isHLSGenerationSupported) return;
 
     const userID = ensureLocalUser().id;
     const files = uniqueFilesByID(await savedCollectionFiles());
@@ -1017,6 +1026,10 @@ const tickNow = () => {
 
 export const isHLSGenerationEnabled = () => _state.isHLSGenerationEnabled;
 
+/** Whether an explicit mobile recreation request is waiting in the live queue. */
+const hasPendingRemoteRecreateWork = () =>
+    _state.liveQueue.some((item) => item.remoteRecreateRequest !== undefined);
+
 /**
  * The video processing loop keeps two items in flight, preferring items in the
  * liveQueue, otherwise working from the backlog. The native Jasna client still
@@ -1054,10 +1067,11 @@ export const isHLSGenerationEnabled = () => _state.isHLSGenerationEnabled;
  * batches, and the externally triggered processing of live uploads.
  */
 const processQueue = async () => {
-    if (!isHLSGenerationSupported || !isHLSGenerationEnabled()) {
+    if (!isHLSGenerationSupported) {
         assertionFailed(); /* we shouldn't have come here */
         return;
     }
+    if (!isHLSGenerationEnabled() && !hasPendingRemoteRecreateWork()) return;
 
     const userID = ensureLocalUser().id;
 
@@ -1140,17 +1154,25 @@ const processQueue = async () => {
         emitPipelineSnapshot();
     };
 
-    while (isHLSGenerationEnabled()) {
+    while (isHLSGenerationEnabled() || hasPendingRemoteRecreateWork()) {
         let loadedBackfill = false;
         while (active.size < processingPipelineWidth) {
             const liveIndex = _state.liveQueue.findIndex(
-                (candidate) => !activeFileIDs.has(candidate.file.id),
+                (candidate) =>
+                    !activeFileIDs.has(candidate.file.id) &&
+                    (isHLSGenerationEnabled() ||
+                        candidate.remoteRecreateRequest !== undefined),
             );
             let item =
                 liveIndex >= 0
                     ? _state.liveQueue.splice(liveIndex, 1)[0]
                     : undefined;
-            if (!item && !bq?.length && !loadedBackfill) {
+            if (
+                !item &&
+                isHLSGenerationEnabled() &&
+                !bq?.length &&
+                !loadedBackfill
+            ) {
                 loadedBackfill = true;
                 if (_state.haveSyncedOnce) {
                     bq = await backfillQueue(userID);
