@@ -74,9 +74,11 @@
 
 ## Desktop Jasna 확인
 
-- Desktop 패키지 버전은 `1.7.23-jasna.1`처럼 `-jasna.` 표식을 포함한다.
-  이 빌드는 공개 Ente 자동 업데이트를 실행하지 않는다. 업스트림 설치 파일이
-  Jasna 통합 빌드를 덮어쓰게 해서는 안 된다.
+- Desktop Jasna 패키지 버전은 `2.0.0-ente-1.7.23-beta.jasna.2`처럼 private
+  release 계열과 실제 기준 업스트림 `1.7.23-beta`, Jasna 개정을 함께 표기한다.
+  `2.0.0`은 공개 `1.x`보다 높고, 이 빌드는 `.jasna.` 표식으로 공개 자동
+  업데이트를 실행하지 않는다. 공개 설치 파일이 Jasna 통합 빌드를 덮어쓰게
+  해서는 안 된다.
 - 설정 파일은 `%LOCALAPPDATA%\ente\jasna\config.json`이다.
 - 현재 기본값은 `generator=jasna-ente-v5`, `detectionModel=rfdetr-v6`,
   `detectionScoreThreshold=0.15`, `secondaryRestoration=unet-4x`,

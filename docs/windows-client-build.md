@@ -63,11 +63,13 @@ Do not substitute the debug keystore or an unrelated repository key.
 
 ## Desktop Photos with Jasna
 
-The Jasna desktop package uses the private version suffix `-jasna.`. The
-current package version is `1.7.23-jasna.1`. Builds with that suffix disable
-the public Ente auto-updater, including install-on-quit, so an upstream Ente
-installer cannot replace the Jasna integration. Increment the trailing Jasna
-revision for subsequent private releases.
+The Jasna desktop package records its private release line, upstream base and
+private revision as `2.0.0-ente-1.7.23-beta.jasna.N`. The current package
+version is `2.0.0-ente-1.7.23-beta.jasna.2`: it is above public `1.x`
+releases while retaining the exact upstream base, `1.7.23-beta`, in the
+version string. The `.jasna.` marker disables the public Ente auto-updater,
+including install-on-quit. Increment only the trailing Jasna revision for
+subsequent private releases.
 
 Use the package scripts so `_ENTE_IS_DESKTOP=1` is present while Next.js builds
 the renderer. A plain `yarn build:photos` does not reproduce that desktop build

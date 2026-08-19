@@ -13,7 +13,7 @@ import { isDev } from "../utils/electron";
  * public Ente release feed, since an upstream installer would remove the
  * bundled Jasna integration.
  */
-const isJasnaBuild = () => app.getVersion().includes("-jasna.");
+const isJasnaBuild = () => app.getVersion().includes(".jasna.");
 
 export const setupAutoUpdater = (mainWindow: BrowserWindow) => {
     autoUpdater.logger = electronLog;
