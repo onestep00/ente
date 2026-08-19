@@ -1,0 +1,16 @@
+{
+    "generator": "jasna-ente-v5",
+    "batchSize": 16,
+    "maxClipSize": 2880,
+    "temporalOverlap": 15,
+    "fp16": true,
+    "compileBasicVSRPP": true,
+    "enableCrossfade": true,
+    "detectionModel": "rfdetr-v6",
+    "detectionScoreThreshold": 0.15,
+    "secondaryRestoration": "unet-4x",
+    "primaryClipBatchSize": "auto",
+    "streamWorkers": "auto",
+    "logLevel": "warning",
+    "extraArgs": []
+}

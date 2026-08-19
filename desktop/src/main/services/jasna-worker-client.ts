@@ -23,29 +23,41 @@ const jobStallTimeoutMs = 2 * 60 * 1000;
 const heartbeatTimeoutMs = 5 * 1000;
 const maximumJobTimeoutMs = 24 * 60 * 60 * 1000;
 const maximumJobAttempts = 2;
+const jasnaConfigEnvVar = "ENTE_JASNA_CONFIG";
 
-const managedJasnaArgs = [
-    "--max-clip-size",
-    "360",
-    "--temporal-overlap",
-    "15",
-    "--fp16",
-    "--compile-basicvsrpp",
-    "--enable-crossfade",
-    "--detection-model",
-    "rfdetr-v6",
-    "--detection-score-threshold",
-    "0.15",
-    "--secondary-restoration",
-    "unet-4x",
-] as const;
+const defaultJasnaConfig = {
+    generator: "jasna-ente-v5",
+    batchSize: 16,
+    maxClipSize: 2880,
+    temporalOverlap: 15,
+    fp16: true,
+    compileBasicVSRPP: true,
+    enableCrossfade: true,
+    detectionModel: "rfdetr-v6",
+    detectionScoreThreshold: 0.15,
+    secondaryRestoration: "unet-4x",
+    primaryClipBatchSize: "auto",
+    streamWorkers: "auto",
+    logLevel: "warning",
+    extraArgs: [] as string[],
+} as const;
 
-const dynamicJasnaArgs = [
-    "--primary-clip-batch-size",
-    "auto",
-    "--stream-workers",
-    "auto",
-] as const;
+type JasnaConfig = {
+    generator: string;
+    batchSize: number;
+    maxClipSize: number;
+    temporalOverlap: number;
+    fp16: boolean;
+    compileBasicVSRPP: boolean;
+    enableCrossfade: boolean;
+    detectionModel: string;
+    detectionScoreThreshold: number;
+    secondaryRestoration: string;
+    primaryClipBatchSize: string;
+    streamWorkers: string;
+    logLevel: "error" | "warning" | "info" | "debug";
+    extraArgs: string[];
+};
 
 interface JasnaWorkerPaths {
     proxyPath: string;
@@ -135,6 +147,243 @@ export const initializeJasnaWorker = (paths: JasnaWorkerPaths) => {
 
 export const isJasnaConfigured = () =>
     process.platform == "win32" && process.arch == "x64";
+
+const jasnaConfigPath = () => {
+    const override = process.env[jasnaConfigEnvVar]?.trim();
+    if (override) return path.resolve(override);
+    if (!workerPaths) throw new Error("Jasna worker was not initialized");
+    return path.join(workerPaths.installDirectory, "config.json");
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+    !!value && typeof value == "object" && !Array.isArray(value);
+
+const assertConfigString = (value: unknown, name: string) => {
+    if (typeof value != "string" || !value.trim())
+        throw new Error(`Jasna config ${name} must be a non-empty string`);
+    return value.trim();
+};
+
+const assertConfigGenerator = (value: unknown) => {
+    const generator = assertConfigString(value, "generator");
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(generator))
+        throw new Error(
+            "Jasna config generator must contain only letters, numbers, dots, underscores, or hyphens",
+        );
+    return generator;
+};
+
+const assertConfigInteger = (
+    value: unknown,
+    name: string,
+    minimum: number,
+    maximum: number,
+) => {
+    if (
+        typeof value != "number" ||
+        !Number.isInteger(value) ||
+        value < minimum ||
+        value > maximum
+    )
+        throw new Error(
+            `Jasna config ${name} must be an integer in [${minimum}, ${maximum}]`,
+        );
+    return value;
+};
+
+const assertConfigNumber = (
+    value: unknown,
+    name: string,
+    minimum: number,
+    maximum: number,
+) => {
+    if (
+        typeof value != "number" ||
+        !Number.isFinite(value) ||
+        value < minimum ||
+        value > maximum
+    )
+        throw new Error(
+            `Jasna config ${name} must be a number in [${minimum}, ${maximum}]`,
+        );
+    return value;
+};
+
+const assertConfigBoolean = (value: unknown, name: string) => {
+    if (typeof value != "boolean")
+        throw new Error(`Jasna config ${name} must be a boolean`);
+    return value;
+};
+
+const assertConfigWorkerValue = (value: unknown, name: string) => {
+    if (typeof value != "string" || !/^(auto|[1-9][0-9]*)$/.test(value.trim()))
+        throw new Error(
+            `Jasna config ${name} must be \"auto\" or a positive integer string`,
+        );
+    return value.trim();
+};
+
+const assertConfigLogLevel = (value: unknown): JasnaConfig["logLevel"] => {
+    if (
+        value != "error" &&
+        value != "warning" &&
+        value != "info" &&
+        value != "debug"
+    )
+        throw new Error(
+            "Jasna config logLevel must be one of error, warning, info, or debug",
+        );
+    return value as JasnaConfig["logLevel"];
+};
+
+const validateJasnaExtraArgs = (value: unknown) => {
+    if (!Array.isArray(value) || !value.every((arg) => typeof arg == "string"))
+        throw new Error("Jasna config extraArgs must be a string array");
+    const enteOwned = new Set([
+        "--input",
+        "--output",
+        "--stream",
+        "--stream-port",
+        "--stream-segment-duration",
+        "--batch-size",
+        "--max-clip-size",
+        "--temporal-overlap",
+        "--fp16",
+        "--no-fp16",
+        "--compile-basicvsrpp",
+        "--no-compile-basicvsrpp",
+        "--enable-crossfade",
+        "--no-enable-crossfade",
+        "--detection-model",
+        "--detection-score-threshold",
+        "--secondary-restoration",
+        "--log-level",
+        "--primary-clip-batch-size",
+        "--stream-workers",
+    ]);
+    for (const arg of value) {
+        const option = arg.trim().split("=", 1)[0] ?? "";
+        if (enteOwned.has(option))
+            throw new Error(`Jasna config extraArgs cannot override ${option}`);
+    }
+    return [...value] as string[];
+};
+
+const readJasnaConfig = async (): Promise<JasnaConfig> => {
+    const configPath = jasnaConfigPath();
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(await fs.readFile(configPath, "utf8"));
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code != "ENOENT") {
+            throw new Error(`Could not read Jasna config ${configPath}`, {
+                cause: error,
+            });
+        }
+        await fs.mkdir(path.dirname(configPath), { recursive: true });
+        await fs.writeFile(
+            configPath,
+            `${JSON.stringify(defaultJasnaConfig, undefined, 2)}\n`,
+            "utf8",
+        );
+        log.info(`Created default Jasna config at ${configPath}`);
+        return { ...defaultJasnaConfig, extraArgs: [] };
+    }
+
+    if (!isRecord(parsed))
+        throw new Error(
+            `Jasna config ${configPath} must contain a JSON object`,
+        );
+    const legacyManagedConfig =
+        parsed.generator == "jasna-ente-v5" &&
+        parsed.batchSize == 16 &&
+        parsed.maxClipSize == 600 &&
+        parsed.temporalOverlap == 15 &&
+        parsed.detectionModel == "rfdetr-v6" &&
+        parsed.detectionScoreThreshold == 0.15 &&
+        parsed.secondaryRestoration == "unet-4x" &&
+        parsed.logLevel === undefined;
+    const candidate = {
+        ...defaultJasnaConfig,
+        ...parsed,
+        extraArgs: parsed.extraArgs ?? defaultJasnaConfig.extraArgs,
+        ...(legacyManagedConfig
+            ? {
+                  batchSize: defaultJasnaConfig.batchSize,
+                  maxClipSize: defaultJasnaConfig.maxClipSize,
+                  logLevel: defaultJasnaConfig.logLevel,
+              }
+            : {}),
+    };
+    const config: JasnaConfig = {
+        generator: assertConfigGenerator(candidate.generator),
+        batchSize: assertConfigInteger(candidate.batchSize, "batchSize", 1, 64),
+        maxClipSize: assertConfigInteger(
+            candidate.maxClipSize,
+            "maxClipSize",
+            30,
+            3600,
+        ),
+        temporalOverlap: assertConfigInteger(
+            candidate.temporalOverlap,
+            "temporalOverlap",
+            0,
+            120,
+        ),
+        fp16: assertConfigBoolean(candidate.fp16, "fp16"),
+        compileBasicVSRPP: assertConfigBoolean(
+            candidate.compileBasicVSRPP,
+            "compileBasicVSRPP",
+        ),
+        enableCrossfade: assertConfigBoolean(
+            candidate.enableCrossfade,
+            "enableCrossfade",
+        ),
+        detectionModel: assertConfigString(
+            candidate.detectionModel,
+            "detectionModel",
+        ),
+        detectionScoreThreshold: assertConfigNumber(
+            candidate.detectionScoreThreshold,
+            "detectionScoreThreshold",
+            0,
+            1,
+        ),
+        secondaryRestoration: assertConfigString(
+            candidate.secondaryRestoration,
+            "secondaryRestoration",
+        ),
+        primaryClipBatchSize: assertConfigWorkerValue(
+            candidate.primaryClipBatchSize,
+            "primaryClipBatchSize",
+        ),
+        streamWorkers: assertConfigWorkerValue(
+            candidate.streamWorkers,
+            "streamWorkers",
+        ),
+        logLevel: assertConfigLogLevel(candidate.logLevel),
+        extraArgs: validateJasnaExtraArgs(candidate.extraArgs),
+    };
+    if (config.temporalOverlap * 2 >= config.maxClipSize)
+        throw new Error(
+            "Jasna config temporalOverlap must be less than half of maxClipSize",
+        );
+    log.info(`Loaded Jasna config from ${configPath}`);
+    if (legacyManagedConfig) {
+        await fs.writeFile(
+            configPath,
+            `${JSON.stringify(config, undefined, 2)}\n`,
+            "utf8",
+        );
+        log.info(
+            `Migrated legacy Jasna config to tuned defaults at ${configPath}`,
+        );
+    }
+    return config;
+};
+
+export const getJasnaGenerator = async () =>
+    (await readJasnaConfig()).generator;
 
 const managedManifestPath = () =>
     path.join(workerPaths!.installDirectory, "current.json");
@@ -363,13 +612,37 @@ const resolveExecutable = async () => {
     return resolvedExecutable;
 };
 
-const configuredArgs = (supportsDynamicJobs: boolean) => {
+const configuredArgs = (supportsDynamicJobs: boolean, config: JasnaConfig) => {
     const raw = process.env[jasnaArgsEnvVar]?.trim();
     const defaults = [
         "--batch-size",
-        supportsDynamicJobs ? "8" : "4",
-        ...managedJasnaArgs,
-        ...(supportsDynamicJobs ? dynamicJasnaArgs : []),
+        config.batchSize.toString(),
+        "--max-clip-size",
+        config.maxClipSize.toString(),
+        "--temporal-overlap",
+        config.temporalOverlap.toString(),
+        config.fp16 ? "--fp16" : "--no-fp16",
+        config.compileBasicVSRPP
+            ? "--compile-basicvsrpp"
+            : "--no-compile-basicvsrpp",
+        config.enableCrossfade ? "--enable-crossfade" : "--no-enable-crossfade",
+        "--detection-model",
+        config.detectionModel,
+        "--detection-score-threshold",
+        config.detectionScoreThreshold.toString(),
+        "--secondary-restoration",
+        config.secondaryRestoration,
+        "--log-level",
+        config.logLevel,
+        ...(supportsDynamicJobs
+            ? [
+                  "--primary-clip-batch-size",
+                  config.primaryClipBatchSize,
+                  "--stream-workers",
+                  config.streamWorkers,
+              ]
+            : []),
+        ...config.extraArgs,
     ];
     if (!raw) return defaults;
     const parsed: unknown = JSON.parse(raw);
@@ -385,8 +658,25 @@ const configuredArgs = (supportsDynamicJobs: boolean) => {
         "--stream",
         "--stream-port",
         "--stream-segment-duration",
+        "--batch-size",
+        "--max-clip-size",
+        "--temporal-overlap",
+        "--fp16",
+        "--no-fp16",
+        "--compile-basicvsrpp",
+        "--no-compile-basicvsrpp",
+        "--enable-crossfade",
+        "--no-enable-crossfade",
+        "--detection-model",
+        "--detection-score-threshold",
+        "--secondary-restoration",
+        "--log-level",
+        "--primary-clip-batch-size",
+        "--stream-workers",
     ]);
-    const conflict = parsed.find((arg) => enteOwned.has(arg));
+    const conflict = parsed.find((arg) =>
+        enteOwned.has(arg.trim().split("=", 1)[0] ?? ""),
+    );
     if (conflict)
         throw new Error(`${jasnaArgsEnvVar} cannot override ${conflict}`);
     return [...defaults, ...parsed];
@@ -496,8 +786,24 @@ const startWorkerOnce = async () => {
     }
     await ensureInboundBlocked(executable);
     workerSupportsDynamicJobs = await supportsDynamicJobs(executable);
+    const config = await readJasnaConfig();
     const { jobsDirectory, realFFmpegPath } = await installProxy(executable);
     const port = await reservePort();
+    const args = configuredArgs(workerSupportsDynamicJobs, config);
+    log.info(
+        `Starting Jasna ${path.basename(executable)} with ${JSON.stringify({
+            generator: config.generator,
+            batchSize: config.batchSize,
+            maxClipSize: config.maxClipSize,
+            temporalOverlap: config.temporalOverlap,
+            detectionModel: config.detectionModel,
+            detectionScoreThreshold: config.detectionScoreThreshold,
+            secondaryRestoration: config.secondaryRestoration,
+            logLevel: config.logLevel,
+            supportsDynamicJobs: workerSupportsDynamicJobs,
+            args,
+        })}`,
+    );
     const worker = spawn(
         workerPaths!.proxyPath,
         [
@@ -505,7 +811,7 @@ const startWorkerOnce = async () => {
             process.pid.toString(),
             "--",
             executable,
-            ...configuredArgs(workerSupportsDynamicJobs),
+            ...args,
             "--stream",
             "--no-browser",
             "--stream-port",
@@ -513,8 +819,6 @@ const startWorkerOnce = async () => {
             "--stream-segment-duration",
             "2",
             "--no-progress",
-            "--log-level",
-            "warning",
         ],
         {
             windowsHide: true,
@@ -886,7 +1190,10 @@ export const validateJasnaHLSPlaylist = (
     expectedDuration: number,
     outputSize: number,
 ) => {
-    if (!playlist.split(/\r?\n/).includes("#EXT-X-ENDLIST"))
+    const lines = playlist.split(/\r?\n/);
+    if (lines[0] != "#EXTM3U")
+        throw new Error("Jasna HLS playlist is missing #EXTM3U");
+    if (!lines.includes("#EXT-X-ENDLIST"))
         throw new Error("Jasna HLS output is not complete");
     const durations = [...playlist.matchAll(/^#EXTINF:([0-9.]+),/gm)].map(
         (match) => Number(match[1]),
@@ -906,11 +1213,25 @@ export const validateJasnaHLSPlaylist = (
     const ranges = [...playlist.matchAll(/^#EXT-X-BYTERANGE:(\d+)@(\d+)$/gm)];
     if (!ranges.length)
         throw new Error("Jasna HLS playlist has no byte ranges");
-    const requiredSize = Math.max(
-        ...ranges.map((match) => Number(match[1]) + Number(match[2])),
-    );
-    if (!Number.isSafeInteger(requiredSize) || requiredSize > outputSize)
-        throw new Error("Jasna HLS byte ranges exceed the output size");
+    if (ranges.length != durations.length)
+        throw new Error("Jasna HLS segment and byte-range counts differ");
+    let previousEnd = 0;
+    for (const [index, match] of ranges.entries()) {
+        const length = Number(match[1]);
+        const offset = Number(match[2]);
+        if (
+            !Number.isSafeInteger(length) ||
+            !Number.isSafeInteger(offset) ||
+            length <= 0 ||
+            offset < 0 ||
+            offset < previousEnd ||
+            offset + length > outputSize
+        )
+            throw new Error(
+                `Jasna HLS byte range ${index} is invalid or exceeds the output size`,
+            );
+        previousEnd = offset + length;
+    }
 };
 
 const fileSize = async (filePath: string) => {

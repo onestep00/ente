@@ -406,9 +406,59 @@ const createMainWindow = () => {
     // Open the DevTools automatically when running in dev mode
     if (isDev) window.webContents.openDevTools();
 
+    let rendererRestartAttempts = 0;
+    let rendererRestartTimer: ReturnType<typeof setTimeout> | undefined;
+    const rendererRestartLimit = 3;
+    let rendererGpuFallbackStarted = false;
+    const rendererStartedWithGpuDisabled = process.argv.some(
+        (argument) => argument == "--disable-gpu",
+    );
+
+    window.webContents.on("did-finish-load", () => {
+        rendererRestartAttempts = 0;
+    });
+
     window.webContents.on("render-process-gone", (_, details) => {
-        log.error(`render-process-gone: ${details.reason}`);
-        window.webContents.reload();
+        log.error(
+            `render-process-gone: ${details.reason} (exitCode=${details.exitCode})`,
+        );
+
+        // A launch failure is deterministic when Chromium cannot start its GPU
+        // child (for example, a missing GPU/runtime dependency). Retrying the
+        // renderer immediately creates duplicate observers and can raise
+        // STATUS_BREAKPOINT (0x80000003). Relaunch once with software GPU
+        // rendering so the desktop app remains usable without changing Jasna's
+        // independent CUDA/NVENC process. If the fallback itself fails, leave
+        // the renderer stable instead of entering an unbounded restart loop.
+        if (details.reason == "launch-failed") {
+            if (
+                rendererStartedWithGpuDisabled ||
+                rendererGpuFallbackStarted ||
+                app.isPackaged === false
+            ) {
+                return;
+            }
+
+            rendererGpuFallbackStarted = true;
+            log.warn(
+                "Renderer launch failed; relaunching once with --disable-gpu",
+            );
+            app.relaunch({ args: [...process.argv.slice(1), "--disable-gpu"] });
+            app.exit(0);
+            return;
+        }
+        if (rendererRestartAttempts >= rendererRestartLimit) {
+            log.error("Renderer restart limit reached; not reloading again");
+            return;
+        }
+
+        rendererRestartAttempts += 1;
+        const delayMs = 1000 * 2 ** (rendererRestartAttempts - 1);
+        if (rendererRestartTimer) clearTimeout(rendererRestartTimer);
+        rendererRestartTimer = setTimeout(() => {
+            rendererRestartTimer = undefined;
+            if (!window.isDestroyed()) void window.webContents.reload();
+        }, delayMs);
     });
 
     // "The unresponsive event is fired when Chromium detects that your

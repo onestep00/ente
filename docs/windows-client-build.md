@@ -1,5 +1,10 @@
 # Windows client builds
 
+작성일: 2026-08-19
+갱신일: 2026-08-19
+상태: 적용 중
+적용 범위: Windows Android/Desktop 로컬 빌드
+
 These commands are the verified local build path for the Ente Photos mobile and
 desktop clients on Windows. Run them from a PowerShell prompt.
 
@@ -58,9 +63,20 @@ Do not substitute the debug keystore or an unrelated repository key.
 
 ## Desktop Photos with Jasna
 
+The Jasna desktop package uses the private version suffix `-jasna.`. The
+current package version is `1.7.23-jasna.1`. Builds with that suffix disable
+the public Ente auto-updater, including install-on-quit, so an upstream Ente
+installer cannot replace the Jasna integration. Increment the trailing Jasna
+revision for subsequent private releases.
+
 Use the package scripts so `_ENTE_IS_DESKTOP=1` is present while Next.js builds
 the renderer. A plain `yarn build:photos` does not reproduce that desktop build
 environment.
+
+The required order for TypeScript-only desktop changes is `tsc` (emit) and then
+Electron Builder. `tsc --noEmit` only checks types and does not update
+`desktop\app\*.js`; packaging immediately after a no-emit check can therefore
+ship an older main process. The repository-level details are in `AGENTS.md`.
 
 ```powershell
 Set-Location "$Repo\desktop"
@@ -86,6 +102,20 @@ The executable is then:
 ```text
 C:\Users\jmg29\builds\ente-jasna\win-unpacked\ente.exe
 ```
+
+For an installable Windows package, use the NSIS target instead of `--dir`:
+
+```powershell
+Set-Location "$Repo\desktop"
+.\node_modules\.bin\tsc.cmd
+.\node_modules\.bin\electron-builder.cmd --win nsis --x64 `
+  --config.compression=store `
+  --config.mac.identity=null `
+  --config.directories.output="C:\Users\jmg29\builds\ente-nsis"
+```
+
+The NSIS package includes `resources\app-update.yml`. A `--dir` package is a
+smoke-test artifact and normally does not include that updater manifest.
 
 `build-renderer` must be rerun after any change under `web/`. TypeScript-only
 changes under `desktop/src` require `tsc` and repackaging. Packaging does not

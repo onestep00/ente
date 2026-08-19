@@ -8,9 +8,17 @@ import log from "../log";
 import { userPreferences } from "../stores/user-preferences";
 import { isDev } from "../utils/electron";
 
+/**
+ * Jasna builds are a private desktop channel. They must never consume the
+ * public Ente release feed, since an upstream installer would remove the
+ * bundled Jasna integration.
+ */
+const isJasnaBuild = () => app.getVersion().includes("-jasna.");
+
 export const setupAutoUpdater = (mainWindow: BrowserWindow) => {
     autoUpdater.logger = electronLog;
     autoUpdater.autoDownload = false;
+    autoUpdater.autoInstallOnAppQuit = false;
     // This is going to be the default at some point, right now if we don't
     // explicitly set this to true then electron-builder prints a (harmless)
     // warning when updating on Windows.
@@ -19,6 +27,13 @@ export const setupAutoUpdater = (mainWindow: BrowserWindow) => {
     // Disable differential downloads to fix Windows NSIS update issues
     // See: https://github.com/electron-userland/electron-builder/issues/9181
     autoUpdater.disableDifferentialDownload = true;
+
+    if (isJasnaBuild()) {
+        log.info(
+            `Skipping public Ente auto-updater for private Jasna build ${app.getVersion()}`,
+        );
+        return;
+    }
     /**
      * [Note: Testing auto updates]
      *
@@ -98,17 +113,21 @@ export const setupAutoUpdater = (mainWindow: BrowserWindow) => {
     */
 
     const oneDay = 1 * 24 * 60 * 60 * 1000;
-    setInterval(() => void checkForUpdatesAndNotify(mainWindow), oneDay);
-    void checkForUpdatesAndNotify(mainWindow);
+    setInterval(() => void checkForUpdatesSafely(mainWindow), oneDay);
+    void checkForUpdatesSafely(mainWindow);
 };
 
 /**
  * Check for app update check ignoring any previously saved skips / mutes.
  */
 export const forceCheckForAppUpdates = (mainWindow: BrowserWindow) => {
+    if (isJasnaBuild()) {
+        log.info("Skipping public Ente update check for private Jasna build");
+        return;
+    }
     userPreferences.delete("skipAppVersion");
     userPreferences.delete("muteUpdateNotificationVersion");
-    void checkForUpdatesAndNotify(mainWindow, { notifyImmediately: true });
+    void checkForUpdatesSafely(mainWindow, { notifyImmediately: true });
 };
 
 interface CheckForUpdatesAndNotifyOpts {
@@ -123,6 +142,20 @@ interface CheckForUpdatesAndNotifyOpts {
      */
     notifyImmediately?: boolean;
 }
+
+const checkForUpdatesSafely = async (
+    mainWindow: BrowserWindow,
+    opts?: CheckForUpdatesAndNotifyOpts,
+) => {
+    try {
+        await checkForUpdatesAndNotify(mainWindow, opts);
+    } catch (error) {
+        // Unpacked local builds do not contain app-update.yml. Treat that as
+        // a disabled updater instead of an unhandled rejection that obscures
+        // the actual desktop/renderer startup result.
+        log.error("Auto update check failed", error);
+    }
+};
 
 const checkForUpdatesAndNotify = async (
     mainWindow: BrowserWindow,
@@ -188,6 +221,12 @@ const checkForUpdatesAndNotify = async (
 export const appVersion = () => `v${app.getVersion()}`;
 
 export const updateAndRestart = () => {
+    if (isJasnaBuild()) {
+        log.warn(
+            "Ignoring upstream update install request for private Jasna build",
+        );
+        return;
+    }
     log.info("Restarting the app to apply update");
     allowWindowClose();
     autoUpdater.quitAndInstall();

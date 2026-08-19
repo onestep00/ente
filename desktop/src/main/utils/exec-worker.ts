@@ -1,5 +1,4 @@
-import shellescape from "any-shell-escape";
-import { exec } from "node:child_process";
+import { exec, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import log from "../log-worker";
 
@@ -11,13 +10,23 @@ import log from "../log-worker";
  * imports are available. See [Note: Using Electron APIs in UtilityProcess].
  */
 export const execAsyncWorker = async (command: string | string[]) => {
-    const escapedCommand = Array.isArray(command)
-        ? shellescape(command)
-        : command;
     const startTime = Date.now();
-    const result = await execAsync_(escapedCommand);
-    log.debugString(`${escapedCommand} (${Date.now() - startTime} ms)`);
+    if (Array.isArray(command)) {
+        const [binary, ...args] = command;
+        if (!binary) throw new Error("Command missing executable");
+        const result = await execFileAsync(binary, args, {
+            windowsHide: true,
+            maxBuffer: 16 * 1024 * 1024,
+        });
+        log.debugString(
+            `${[binary, ...args].join(" ")} (${Date.now() - startTime} ms)`,
+        );
+        return result;
+    }
+    const result = await execAsync_(command);
+    log.debugString(`${command} (${Date.now() - startTime} ms)`);
     return result;
 };
 
 const execAsync_ = promisify(exec);
+const execFileAsync = promisify(execFile);

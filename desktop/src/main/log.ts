@@ -55,15 +55,27 @@ const messageWithError = (message: string, e?: unknown) => {
     return `${message}: ${es}`;
 };
 
+// A packaged background/tray process can outlive the shell that started it.
+// In that case Node's stderr becomes a closed pipe and console.error throws
+// synchronously. Logging must still reach electron-log without recursively
+// reporting the EPIPE as another unhandled error.
+const safeConsoleError = (message: string) => {
+    try {
+        console.error(message);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code != "EPIPE") throw error;
+    }
+};
+
 const logError = (message: string, e?: unknown) => {
     const m = `[error] ${messageWithError(message, e)}`;
-    console.error(m);
+    safeConsoleError(m);
     log.error(`[main] ${m}`);
 };
 
 const logWarn = (message: string, e?: unknown) => {
     const m = `[warn] ${messageWithError(message, e)}`;
-    console.error(m);
+    safeConsoleError(m);
     log.error(`[main] ${m}`);
 };
 

@@ -45,9 +45,9 @@ import {
  * Depends on {@link registerPrivilegedSchemes}.
  */
 export const registerStreamProtocol = () => {
-    protocol.handle("stream", (request: Request) => {
+    protocol.handle("stream", async (request: Request) => {
         try {
-            return handleStreamRequest(request);
+            return await handleStreamRequest(request);
         } catch (e) {
             log.error(`Failed to handle stream request for ${request.url}`, e);
             return new Response(String(e), { status: 500 });

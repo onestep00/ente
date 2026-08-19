@@ -23,6 +23,7 @@ import {
     publicRequestHeaders,
 } from "../utils/http";
 import {
+    getJasnaGenerator,
     initializeJasnaWorker,
     isJasnaConfigured,
     runJasnaHLSJob,
@@ -464,7 +465,7 @@ export interface FFmpegGenerateHLSPlaylistAndSegmentsResult {
     dimensions: { width: number; height: number };
     videoSize: number;
     videoObjectID: string;
-    generator: "ente-ffmpeg-v1" | "jasna-ente-v4";
+    generator: string;
 }
 
 /**
@@ -518,6 +519,10 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
     fetchURL: string,
     authToken: string,
 ): Promise<FFmpegGenerateHLSPlaylistAndSegmentsResult | undefined> => {
+    const jasnaConfigured = isJasnaConfigured();
+    const jasnaGenerator = jasnaConfigured
+        ? await getJasnaGenerator()
+        : undefined;
     const {
         isH264,
         streamCopySafe,
@@ -556,7 +561,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
     //
     // Not fully related to this case, but mentioning here as to why both the
     // size and codec need to be checked before skipping stream generation.
-    if (!isJasnaConfigured() && isH264) {
+    if (!jasnaConfigured && isH264) {
         const inputVideoSize = await fs
             .stat(inputFilePath)
             .then((st) => st.size);
@@ -888,7 +893,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
             });
         };
 
-        if (isJasnaConfigured()) {
+        if (jasnaConfigured) {
             if (!width || !height || !durationSeconds)
                 throw new Error("Jasna requires video dimensions and duration");
             await runJasnaHLSJob({
@@ -936,7 +941,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
 
         // Determine the dimensions of the generated video from the stderr
         // output produced by ffmpeg during the conversion.
-        if (!isJasnaConfigured()) {
+        if (!jasnaConfigured) {
             dimensions = await detectVideoDimensions(stderrPath);
         }
 
@@ -976,7 +981,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
         dimensions,
         videoSize,
         videoObjectID,
-        generator: isJasnaConfigured() ? "jasna-ente-v4" : "ente-ffmpeg-v1",
+        generator: jasnaConfigured ? jasnaGenerator! : "ente-ffmpeg-v1",
     };
 };
 

@@ -12,8 +12,22 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
+use std::time::Instant;
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::{ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_UNABLE_TO_REMOVE_REPLACED},
+    Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING},
+};
+
 const JOB_ENV: &str = "ENTE_JASNA_FFMPEG_JOB";
 const REAL_FFMPEG_ENV: &str = "ENTE_JASNA_REAL_FFMPEG";
+#[cfg(windows)]
+const STATUS_PUBLISH_RETRY_LIMIT: Duration = Duration::from_secs(2);
+#[cfg(windows)]
+const STATUS_PUBLISH_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -599,8 +613,61 @@ fn write_status(
         serde_json::to_vec(&value).map_err(|error| format!("encode status: {error}"))?,
     )
     .map_err(|error| format!("write status: {error}"))?;
-    let _ = fs::remove_file(path);
-    fs::rename(&temporary, path).map_err(|error| format!("publish status: {error}"))
+    publish_status(&temporary, path)
+}
+
+#[cfg(windows)]
+fn publish_status(temporary: &Path, destination: &Path) -> Result<(), String> {
+    let temporary_wide: Vec<u16> = windows_publish_path(temporary)?
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let destination_wide: Vec<u16> = windows_publish_path(destination)?
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let started = Instant::now();
+    loop {
+        let moved = unsafe {
+            MoveFileExW(
+                temporary_wide.as_ptr(),
+                destination_wide.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING,
+            )
+        };
+        if moved != 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        let retryable = matches!(
+            error.raw_os_error().map(|code| code as u32),
+            Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION | ERROR_UNABLE_TO_REMOVE_REPLACED)
+        );
+        if !retryable || started.elapsed() >= STATUS_PUBLISH_RETRY_LIMIT {
+            return Err(format!("publish status: {error}"));
+        }
+        thread::sleep(STATUS_PUBLISH_RETRY_DELAY);
+    }
+}
+
+#[cfg(windows)]
+fn windows_publish_path(path: &Path) -> Result<PathBuf, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("status path has no parent: {}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| format!("status path has no file name: {}", path.display()))?;
+    fs::canonicalize(parent)
+        .map(|canonical_parent| canonical_parent.join(file_name))
+        .map_err(|error| format!("resolve status parent {}: {error}", parent.display()))
+}
+
+#[cfg(not(windows))]
+fn publish_status(temporary: &Path, destination: &Path) -> Result<(), String> {
+    fs::rename(temporary, destination).map_err(|error| format!("publish status: {error}"))
 }
 
 fn fail_job(job: &Job, error: &str) -> Result<i32, String> {
@@ -619,6 +686,17 @@ fn run_passthrough(real_ffmpeg: &Path, args: &[String]) -> Result<i32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temporary_test_directory(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        env::temp_dir().join(format!(
+            "ente-jasna-proxy-{name}-{}-{unique}",
+            std::process::id()
+        ))
+    }
 
     fn job() -> Job {
         Job {
@@ -747,5 +825,114 @@ mod tests {
         let invocation = vec![r"C:\Temp\jasna_hls_job_unsafe_x\stream.m3u8".to_owned()];
 
         assert!(invocation_mentions_job(&invocation, &selected));
+    }
+
+    #[test]
+    fn replaces_existing_status_file() {
+        let directory = temporary_test_directory("status-replace");
+        fs::create_dir(&directory).unwrap();
+        let status_path = directory.join("status.json");
+        let mut selected = job();
+        selected.status_path = status_path.to_string_lossy().into_owned();
+
+        write_status(&selected, "running", Some(0.5), None).unwrap();
+        write_status(&selected, "complete", Some(1.0), None).unwrap();
+
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&status_path).unwrap()).unwrap();
+        assert_eq!(value["state"], "complete");
+        assert_eq!(value["progress"], 1.0);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn retries_status_replace_while_a_reader_blocks_delete() {
+        use std::fs::OpenOptions;
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+        let directory = temporary_test_directory("status-sharing");
+        fs::create_dir(&directory).unwrap();
+        let status_path = directory.join("status.json");
+        let mut selected = job();
+        selected.status_path = status_path.to_string_lossy().into_owned();
+        write_status(&selected, "running", Some(0.5), None).unwrap();
+
+        let reader = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&status_path)
+            .unwrap();
+        let release_reader = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            drop(reader);
+        });
+
+        write_status(&selected, "complete", Some(1.0), None).unwrap();
+        release_reader.join().unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&status_path).unwrap()).unwrap();
+        assert_eq!(value["state"], "complete");
+        assert_eq!(value["progress"], 1.0);
+        assert!(!status_path
+            .with_extension(format!("tmp.{}", std::process::id()))
+            .exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bounds_a_permanently_blocked_status_replace() {
+        use std::fs::OpenOptions;
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+        let directory = temporary_test_directory("status-timeout");
+        fs::create_dir(&directory).unwrap();
+        let status_path = directory.join("status.json");
+        let mut selected = job();
+        selected.status_path = status_path.to_string_lossy().into_owned();
+        write_status(&selected, "running", Some(0.5), None).unwrap();
+
+        let reader = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&status_path)
+            .unwrap();
+        let started = Instant::now();
+        let error = write_status(&selected, "complete", Some(1.0), None).unwrap_err();
+
+        assert!(started.elapsed() >= STATUS_PUBLISH_RETRY_LIMIT);
+        assert!(started.elapsed() < STATUS_PUBLISH_RETRY_LIMIT + Duration::from_secs(1));
+        assert!(error.starts_with("publish status:"));
+        assert!(status_path
+            .with_extension(format!("tmp.{}", std::process::id()))
+            .exists());
+        drop(reader);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn publishes_status_beyond_the_legacy_windows_path_limit() {
+        let root = temporary_test_directory("status-long-path");
+        let mut directory = root.clone();
+        while directory.as_os_str().len() < 300 {
+            directory.push("status-path-segment-0123456789abcdef");
+        }
+        fs::create_dir_all(&directory).unwrap();
+        let status_path = directory.join("status.json");
+        let mut selected = job();
+        selected.status_path = status_path.to_string_lossy().into_owned();
+
+        write_status(&selected, "running", Some(0.5), None).unwrap();
+        write_status(&selected, "complete", Some(1.0), None).unwrap();
+
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&status_path).unwrap()).unwrap();
+        assert_eq!(value["state"], "complete");
+        assert!(status_path.as_os_str().len() > 260);
+        fs::remove_dir_all(root).unwrap();
     }
 }
