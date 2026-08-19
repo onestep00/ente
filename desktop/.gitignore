@@ -20,6 +20,9 @@ out
 
 # electron-builder
 dist/
+dist-*/
+runtime-check*/
+runtime-config-check/
 
 # Legacy, people who checked out main for a brief while in Jan 2025 may have
 # this. Can be removed in the future.
