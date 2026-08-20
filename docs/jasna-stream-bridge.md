@@ -1,5 +1,10 @@
 # Jasna stream integration
 
+작성일: 2026-08-18
+갱신일: 2026-08-20
+상태: 적용 중
+적용 범위: Ente Photos Android의 수동 stream recreation 및 Windows Desktop
+
 Ente Desktop can use the unmodified official Jasna Windows NVIDIA release to
 restore video previews. Ente starts Jasna's stock persistent streaming mode and
 temporarily replaces the release's `tools/ffmpeg.exe` with an Ente proxy. The
@@ -106,6 +111,17 @@ stream has uploaded successfully. Repeated taps with an outstanding request do
 not create duplicate work. If the acknowledgement write fails after a completed
 upload, Desktop retries only the metadata acknowledgement during later syncs;
 it does not run Jasna again while that process remains active.
+
+The Android action does not enqueue Android FFmpeg work and is available even
+when Android streamable-video processing is disabled. It can recreate an
+existing preview or request the first preview for an eligible video. Android no
+longer auto-queues low-quality streams for recreation; Desktop owns that work.
+Pre-existing Android recreation queue entries are forwarded to Desktop before
+any Android stream processing begins. Automatic initial stream creation remains
+controlled by the Android preference. Desktop handles a synced explicit
+recreation request even when its own automatic HLS-generation preference is
+disabled. That preference only controls automatic upload processing and
+backfill.
 
 Desktop's Electron main process emits a sync pulse every 60 seconds. The
 renderer has background throttling disabled for this window, so the incremental

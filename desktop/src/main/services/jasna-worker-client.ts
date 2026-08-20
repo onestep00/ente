@@ -42,7 +42,7 @@ const defaultJasnaConfig = {
     extraArgs: [] as string[],
 } as const;
 
-type JasnaConfig = {
+interface JasnaConfig {
     generator: string;
     batchSize: number;
     maxClipSize: number;
@@ -57,7 +57,7 @@ type JasnaConfig = {
     streamWorkers: string;
     logLevel: "error" | "warning" | "info" | "debug";
     extraArgs: string[];
-};
+}
 
 interface JasnaWorkerPaths {
     proxyPath: string;
@@ -115,6 +115,32 @@ let lastInstallError: Error | undefined;
 let firewalledExecutable: string | undefined;
 let workerSupportsDynamicJobs = false;
 
+type JasnaJobFailureKind = "source" | "worker";
+
+/**
+ * A failure reported by a Jasna pipeline thread. Jasna v0.10 can keep its
+ * HTTP server and heartbeat alive after a pipeline thread has crashed, so the
+ * desktop client must surface these failures independently of /status.
+ */
+class JasnaJobFailure extends Error {
+    constructor(
+        readonly kind: JasnaJobFailureKind,
+        message: string,
+    ) {
+        super(message);
+        this.name = "JasnaJobFailure";
+    }
+}
+
+interface ActiveJasnaJob {
+    inputPath: string;
+    armed: boolean;
+    reject: (error: JasnaJobFailure) => void;
+}
+
+/** Active jobs sharing the persistent Jasna worker. */
+const activeJasnaJobs = new Map<string, ActiveJasnaJob>();
+
 interface JobCompletion {
     recoveredFromOutput: boolean;
 }
@@ -140,6 +166,54 @@ const managedAssets = [
 ] as const satisfies readonly ManagedAsset[];
 const managedReleaseURL = `https://github.com/Kruk2/jasna/releases/download/${managedRelease}`;
 const managedInstalledSize = 8_778_018_427;
+
+const jasnaFailureKind = (line: string): JasnaJobFailureKind | undefined => {
+    const lower = line.toLowerCase();
+
+    // These messages are emitted after Jasna has exhausted its corrupt-packet
+    // tolerance. Individual NAL warnings are intentionally ignored because a
+    // decoder may recover from an isolated bad packet.
+    if (lower.includes("videodecodeerror") || lower.includes("corrupt_data"))
+        return "source";
+
+    if (
+        lower.includes("pipeline_threads error") &&
+        lower.includes("thread crashed")
+    )
+        return lower.includes("[decode]") ? "source" : "worker";
+
+    if (
+        lower.includes("cuda out of memory") ||
+        lower.includes("outofmemoryerror")
+    )
+        return "worker";
+
+    return undefined;
+};
+
+const reportJasnaFailure = (line: string) => {
+    const kind = jasnaFailureKind(line);
+    if (!kind) return;
+
+    const armedJobs = [...activeJasnaJobs.entries()].filter(
+        ([, job]) => job.armed,
+    );
+    if (armedJobs.length === 0) return;
+
+    // VideoDecodeError includes the input path. Prefer that match so one bad
+    // source does not mask an unrelated job when the worker supports dynamic
+    // jobs. Unscoped worker failures are broadcast because the shared worker
+    // must be restarted before any of its jobs can safely continue.
+    const matchingJobs = armedJobs.filter(([, job]) =>
+        line.includes(job.inputPath),
+    );
+    const affectedJobs = matchingJobs.length ? matchingJobs : armedJobs;
+    const error = new JasnaJobFailure(
+        kind,
+        `Jasna ${kind} failure reported by worker: ${line}`,
+    );
+    for (const [, job] of affectedJobs) job.reject(error);
+};
 
 export const initializeJasnaWorker = (paths: JasnaWorkerPaths) => {
     workerPaths = paths;
@@ -218,7 +292,7 @@ const assertConfigBoolean = (value: unknown, name: string) => {
 const assertConfigWorkerValue = (value: unknown, name: string) => {
     if (typeof value != "string" || !/^(auto|[1-9][0-9]*)$/.test(value.trim()))
         throw new Error(
-            `Jasna config ${name} must be \"auto\" or a positive integer string`,
+            `Jasna config ${name} must be "auto" or a positive integer string`,
         );
     return value.trim();
 };
@@ -832,12 +906,14 @@ const startWorkerOnce = async () => {
     );
     child = worker;
     workerPort = port;
-    readline
-        .createInterface({ input: worker.stdout })
-        .on("line", (line) => log.info(`[jasna] ${line}`));
-    readline
-        .createInterface({ input: worker.stderr })
-        .on("line", (line) => log.warn(`[jasna] ${line}`));
+    readline.createInterface({ input: worker.stdout }).on("line", (line) => {
+        log.info(`[jasna] ${line}`);
+        reportJasnaFailure(line);
+    });
+    readline.createInterface({ input: worker.stderr }).on("line", (line) => {
+        log.warn(`[jasna] ${line}`);
+        reportJasnaFailure(line);
+    });
     const exited = new Promise<never>((_, reject) => {
         worker.once("error", reject);
         worker.once("exit", (code, signal) => {
@@ -972,8 +1048,24 @@ const runJasnaHLSJobUnlocked = async (job: JasnaJob) => {
                 `Jasna HLS attempt ${attempt}/${maximumJobAttempts} failed`,
                 error,
             );
-            if (!workerSupportsDynamicJobs) await stopWorker();
+            const jasnaFailure =
+                error instanceof JasnaJobFailure ? error : undefined;
+            // A failed attempt can leave Jasna's internal queues or threads in
+            // a broken state even when its HTTP server is still responding.
+            // Always restart the worker before the next attempt; this is also
+            // what releases a model that would otherwise sit idle in VRAM.
+            await stopWorker();
             if (String(error).includes("ENTE_JASNA_UNAVAILABLE")) throw error;
+            // A corrupt source is deterministic. Retrying the same materialized
+            // bytes only burns GPU time and can leave the queue stuck, so let
+            // the renderer mark this file failed and continue with the queue.
+            if (jasnaFailure?.kind == "source") {
+                log.warn(
+                    `Skipping file ${job.fileID} after Jasna rejected its source`,
+                    error,
+                );
+                throw error;
+            }
             if (attempt < maximumJobAttempts)
                 await clearJobOutput(job.outputDir);
         }
@@ -990,7 +1082,7 @@ export const runJasnaHLSJob = async (job: JasnaJob) => {
     legacyJobTail = new Promise<void>((resolve) => (release = resolve));
     await previous;
     try {
-        return await runJasnaHLSJobUnlocked(job);
+        await runJasnaHLSJobUnlocked(job);
     } finally {
         release();
     }
@@ -1034,6 +1126,15 @@ const runJasnaHLSAttempt = async (job: JasnaJob): Promise<JobCompletion> => {
         maxFps: 60,
     });
     try {
+        let rejectFatalFailure!: (error: JasnaJobFailure) => void;
+        const fatalFailure = new Promise<never>((_, reject) => {
+            rejectFatalFailure = reject;
+        });
+        activeJasnaJobs.set(jobId, {
+            inputPath: job.inputPath,
+            armed: false,
+            reject: rejectFatalFailure,
+        });
         let removeExitListener = () => undefined;
         const workerExit = new Promise<never>((_, reject) => {
             const onExit = (
@@ -1060,6 +1161,8 @@ const runJasnaHLSAttempt = async (job: JasnaJob): Promise<JobCompletion> => {
                 throw new Error(
                     `Jasna load failed: HTTP ${response.status} ${await response.text()}`,
                 );
+            const activeJob = activeJasnaJobs.get(jobId);
+            if (activeJob) activeJob.armed = true;
             return new Promise<never>(() => undefined);
         });
         try {
@@ -1067,6 +1170,7 @@ const runJasnaHLSAttempt = async (job: JasnaJob): Promise<JobCompletion> => {
                 waitForJob(job, statusPath, jobId),
                 loadFailure,
                 workerExit,
+                fatalFailure,
             ]);
         } finally {
             removeExitListener();
@@ -1076,11 +1180,15 @@ const runJasnaHLSAttempt = async (job: JasnaJob): Promise<JobCompletion> => {
         throw error;
     } finally {
         controller.abort();
-        await Promise.all([
-            removeFileWithTransientRetry(jobPath),
-            removeFileWithTransientRetry(statusPath),
-            removeFileWithTransientRetry(heartbeatPath),
-        ]);
+        try {
+            await Promise.all([
+                removeFileWithTransientRetry(jobPath),
+                removeFileWithTransientRetry(statusPath),
+                removeFileWithTransientRetry(heartbeatPath),
+            ]);
+        } finally {
+            activeJasnaJobs.delete(jobId);
+        }
     }
 };
 
@@ -1095,7 +1203,7 @@ const waitForJob = async (
             maximumJobTimeoutMs,
             Math.max(30 * 60 * 1000, job.durationSeconds * 20 * 1000),
         );
-    let lastActivity = Date.now();
+    let lastJobActivity = Date.now();
     let lastProgress = -1;
     let lastOutputSize = -1;
     let lastHeartbeat = 0;
@@ -1107,7 +1215,7 @@ const waitForJob = async (
                 status.progress > lastProgress
             ) {
                 lastProgress = status.progress;
-                lastActivity = Date.now();
+                lastJobActivity = Date.now();
                 job.onProgress(status.progress);
             }
             if (status.state == "complete") {
@@ -1115,20 +1223,24 @@ const waitForJob = async (
                 job.onProgress(1);
                 return { recoveredFromOutput: false };
             }
-            if (status.state == "error")
-                throw new Error(status.error ?? "Jasna FFmpeg failed");
+            if (status.state == "error") {
+                const message = status.error ?? "Jasna FFmpeg failed";
+                throw new JasnaJobFailure(
+                    /corrupt|decode|nal/i.test(message) ? "source" : "worker",
+                    message,
+                );
+            }
         }
         const outputSize = await fileSize(
             path.join(job.outputDir, "output.ts"),
         );
         if (outputSize > lastOutputSize) {
             lastOutputSize = outputSize;
-            lastActivity = Date.now();
+            lastJobActivity = Date.now();
         }
         const heartbeat = await fileModifiedTime(`${statusPath}.heartbeat`);
         if (heartbeat > lastHeartbeat) {
             lastHeartbeat = heartbeat;
-            lastActivity = Date.now();
         }
         if (await completedOutputIsValid(job)) {
             await fs
@@ -1143,13 +1255,10 @@ const waitForJob = async (
             return { recoveredFromOutput: true };
         }
         if (Date.now() >= deadline) throw new Error("Jasna job timed out");
-        if (
-            lastHeartbeat > 0 &&
-            Date.now() - lastHeartbeat >= heartbeatTimeoutMs &&
-            Date.now() - lastActivity >= heartbeatTimeoutMs
-        )
+        const now = Date.now();
+        if (lastHeartbeat > 0 && now - lastHeartbeat >= heartbeatTimeoutMs)
             throw new Error("Jasna FFmpeg heartbeat stopped for 5 seconds");
-        if (Date.now() - lastActivity >= jobStallTimeoutMs)
+        if (now - lastJobActivity >= jobStallTimeoutMs)
             throw new Error("Jasna job made no progress for 2 minutes");
         await new Promise((resolve) =>
             setTimeout(resolve, statusPollIntervalMs),

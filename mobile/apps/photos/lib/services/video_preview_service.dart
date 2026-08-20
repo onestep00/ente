@@ -32,6 +32,7 @@ import "package:photos/models/preview/playlist_data.dart";
 import "package:photos/models/preview/preview_item.dart";
 import "package:photos/models/preview/preview_item_status.dart";
 import "package:photos/service_locator.dart";
+import "package:photos/services/desktop_stream_recreate_service.dart";
 import "package:photos/services/filedata/model/file_data.dart";
 import "package:photos/services/isolated_ffmpeg_service.dart";
 import "package:photos/services/machine_learning/compute_controller.dart";
@@ -60,9 +61,6 @@ class VideoPreviewService {
   static const int _maxTargetDimension = 1080;
   static const int _hlsSegmentDurationSeconds = 2;
   static const int _keyframeIntervalSeconds = 2;
-  static const double _bitrateCapHeadroom = 1.3;
-  static const double _recreateStreamMinRatio = 0.5;
-  static const double _recreateSourceMinRatio = 0.8;
   Set<int>? _failureFiles;
   int _streamSessionTotal = 0;
   List<String> _currentEncodingSummaryLines = [];
@@ -231,6 +229,9 @@ class VideoPreviewService {
   // Return value indicates file was successfully added to queue or not
   Future<bool> addToManualQueue(EnteFile file, String queueType) async {
     if (file.uploadedFileID == null) return false;
+    if (queueType == 'recreate') {
+      return DesktopStreamRecreateService.instance.request(file);
+    }
 
     // Check if already in queue
     final bool alreadyInQueue = await uploadLocksDB.isInStreamQueue(
@@ -293,20 +294,6 @@ class VideoPreviewService {
 
   PreviewItemStatus? getProcessingStatus(int uploadedFileID) {
     return _items[uploadedFileID]?.status;
-  }
-
-  Future<bool> _isRecreateOperation(EnteFile file) async {
-    if (file.uploadedFileID == null) return false;
-
-    try {
-      // Check database directly instead of relying on in-memory _manualQueueFiles
-      // which might not be populated yet
-      final manualQueueFiles = await uploadLocksDB.getStreamQueue();
-      final queueType = manualQueueFiles[file.uploadedFileID!];
-      return queueType == 'recreate';
-    } catch (_) {
-      return false;
-    }
   }
 
   Future<void> _ensurePreviewIdsInitialized() async {
@@ -480,19 +467,6 @@ class VideoPreviewService {
     return (sizeBytes * 8000) / microseconds;
   }
 
-  int _capMaxBitrateForSource({
-    required int baseMaxKbps,
-    required double? sourceBitrateKbps,
-    double headroom = 1.1,
-  }) {
-    if (sourceBitrateKbps == null || sourceBitrateKbps <= 0) {
-      return baseMaxKbps;
-    }
-    final capped = (sourceBitrateKbps * headroom).round();
-    if (capped <= 0) return baseMaxKbps;
-    return capped < baseMaxKbps ? capped : baseMaxKbps;
-  }
-
   int _capMaxBufferForBitrate({
     required int baseBufferKbps,
     required int maxBitrateKbps,
@@ -554,109 +528,6 @@ class VideoPreviewService {
     }
     videoFilters.add("format=$pixelFormat");
     return '-vf "${videoFilters.join(",")}" ';
-  }
-
-  ({int minStreamBitrateKbps, int minSourceBitrateKbps})
-      _getRecreateThresholds({
-    required double? sourceBitrateKbps,
-    required bool canUseHardwareEncoder,
-  }) {
-    final effectiveMaxTargetBitrateKbps = canUseHardwareEncoder
-        ? _hardwareMaxTargetBitrateKbps
-        : _maxTargetBitrateKbps;
-    final cappedTargetBitrateKbps = _capMaxBitrateForSource(
-      baseMaxKbps: effectiveMaxTargetBitrateKbps,
-      sourceBitrateKbps: sourceBitrateKbps,
-      headroom: _bitrateCapHeadroom,
-    );
-    final minStreamBitrateKbps =
-        (cappedTargetBitrateKbps * _recreateStreamMinRatio).round();
-    final minSourceBitrateKbps =
-        (effectiveMaxTargetBitrateKbps * _recreateSourceMinRatio).round();
-    return (
-      minStreamBitrateKbps: minStreamBitrateKbps,
-      minSourceBitrateKbps: minSourceBitrateKbps,
-    );
-  }
-
-  bool _shouldAutoRecreateStream(
-    EnteFile file,
-    PreviewInfo previewInfo, {
-    required int minStreamBitrateKbps,
-    required int minSourceBitrateKbps,
-  }) {
-    final durationSeconds = file.duration;
-    final sourceSize = file.fileSize;
-    if (durationSeconds == null || durationSeconds <= 0) return false;
-    if (sourceSize == null || sourceSize <= 0) return false;
-    if (previewInfo.objectSize <= 0) return false;
-
-    final duration = Duration(seconds: durationSeconds);
-    final streamBitrateKbps =
-        _calculateBitrateKbps(previewInfo.objectSize, duration);
-    if (streamBitrateKbps == null ||
-        streamBitrateKbps >= minStreamBitrateKbps) {
-      return false;
-    }
-
-    final sourceBitrateKbps = _calculateBitrateKbps(sourceSize, duration);
-    if (sourceBitrateKbps == null ||
-        sourceBitrateKbps < minSourceBitrateKbps) {
-      return false;
-    }
-
-    return true;
-  }
-
-  Future<void> _queueLowQualityStreamsForRecreate({
-    required List<EnteFile> files,
-    required Map<int, PreviewInfo> previewIds,
-    required Map<int, String> manualQueueFiles,
-  }) async {
-    final bool canUseHardwareEncoder =
-        _preferredHardwareEncoders().isNotEmpty;
-    final futures = <Future<void>>[];
-    var queuedCount = 0;
-
-    for (final file in files) {
-      final fileId = file.uploadedFileID;
-      if (fileId == null) continue;
-      if (manualQueueFiles.containsKey(fileId)) continue;
-      final previewInfo = previewIds[fileId];
-      if (previewInfo == null) continue;
-
-      final durationSeconds = file.duration;
-      final sourceSize = file.fileSize;
-      final double? sourceBitrateKbps =
-          durationSeconds == null || durationSeconds <= 0 || sourceSize == null
-              ? null
-              : _calculateBitrateKbps(
-                  sourceSize,
-                  Duration(seconds: durationSeconds),
-                );
-      final thresholds = _getRecreateThresholds(
-        sourceBitrateKbps: sourceBitrateKbps,
-        canUseHardwareEncoder: canUseHardwareEncoder,
-      );
-      final shouldRecreate = _shouldAutoRecreateStream(
-        file,
-        previewInfo,
-        minStreamBitrateKbps: thresholds.minStreamBitrateKbps,
-        minSourceBitrateKbps: thresholds.minSourceBitrateKbps,
-      );
-      if (!shouldRecreate) continue;
-
-      futures.add(uploadLocksDB.addToStreamQueue(fileId, 'recreate'));
-      manualQueueFiles[fileId] = 'recreate';
-      queuedCount += 1;
-    }
-
-    if (futures.isNotEmpty) {
-      await Future.wait(futures);
-      _logger.info(
-        "[auto-recreate] Queued $queuedCount low-quality streams for recreate",
-      );
-    }
   }
 
   void _updateEncodingSummary({
@@ -755,9 +626,7 @@ class VideoPreviewService {
         return;
       }
       try {
-        // check if playlist already exist, but skip this check for 'recreate' operations
-        final isRecreateOperation = await _isRecreateOperation(enteFile);
-        if (!isRecreateOperation && await getPlaylist(enteFile) != null) {
+        if (await getPlaylist(enteFile) != null) {
           if (ctx != null && ctx.mounted) {
             showShortToast(
               ctx,
@@ -1688,9 +1557,8 @@ class VideoPreviewService {
     );
     final previewIds = fileDataService.previewIds;
 
-    await _queueLowQualityStreamsForRecreate(
+    await _forwardLegacyRecreateRequests(
       files: files,
-      previewIds: previewIds,
       manualQueueFiles: manualQueueFiles,
     );
 
@@ -1744,7 +1612,9 @@ class VideoPreviewService {
         .where(
           (file) =>
               previewIds[file.uploadedFileID] == null &&
-              !manualQueueFiles.containsKey(file.uploadedFileID),
+              !manualQueueFiles.containsKey(file.uploadedFileID) &&
+              !(file.pubMagicMetadata?.hasPendingStreamRecreateRequest ??
+                  false),
         )
         .toList();
 
@@ -1808,6 +1678,53 @@ class VideoPreviewService {
     fileQueue.remove(entry.key);
     chunkAndUploadVideo(null, file).ignore();
     return true;
+  }
+
+  /// Forwards pre-existing Android recreation queue entries to Desktop.
+  ///
+  /// New recreation requests never enter this queue. Retaining an entry that
+  /// cannot be forwarded lets a later foreground stream run retry the metadata
+  /// update without allowing Android FFmpeg to process it.
+  Future<void> _forwardLegacyRecreateRequests({
+    required List<EnteFile> files,
+    required Map<int, String> manualQueueFiles,
+  }) async {
+    var forwardedCount = 0;
+    for (final entry in manualQueueFiles.entries.toList()) {
+      if (entry.value != 'recreate') continue;
+
+      // Do not allow this queue entry to fall through to Android processing.
+      manualQueueFiles.remove(entry.key);
+      EnteFile? file = files.firstWhereOrNull(
+        (candidate) => candidate.uploadedFileID == entry.key,
+      );
+      file ??=
+          await filesDB.getAnyUploadedFile(entry.key).catchError((_) => null);
+      if (file == null) {
+        await uploadLocksDB.removeFromStreamQueue(entry.key);
+        _logger.warning(
+          "[desktop-recreate] Removed stale Android queue entry ${entry.key}",
+        );
+        continue;
+      }
+
+      try {
+        await DesktopStreamRecreateService.instance.request(file);
+        await uploadLocksDB.removeFromStreamQueue(entry.key);
+        forwardedCount += 1;
+      } catch (e, s) {
+        _logger.warning(
+          "[desktop-recreate] Failed to forward ${entry.key}; will retry later",
+          e,
+          s,
+        );
+      }
+    }
+    if (forwardedCount > 0) {
+      _logger.info(
+        "[desktop-recreate] Forwarded $forwardedCount legacy recreation request(s)",
+      );
+    }
   }
 
   bool _allowStream() {

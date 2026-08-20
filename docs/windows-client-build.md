@@ -1,7 +1,7 @@
 # Windows client builds
 
 작성일: 2026-08-19
-갱신일: 2026-08-19
+갱신일: 2026-08-20
 상태: 적용 중
 적용 범위: Windows Android/Desktop 로컬 빌드
 
@@ -38,19 +38,44 @@ dart --version
 
 ## Android Photos
 
-Build the Play Store debug APK:
+Use the build script for a one-command APK build. It validates the
+Flutter and JDK paths, sets the required environment, restores dependencies,
+builds the selected mode, and prints the APK file information.
+
+```powershell
+Set-Location "$Repo\mobile\apps\photos"
+.\scripts\build-android-playstore.ps1
+```
+
+The default flavor is `playstore` and the default mode is `release`. Use
+`-Flavor independent` for the independent app. `-Mode debug` selects a debug
+APK. `-SkipPubGet` is available only when dependencies have already been
+restored for the same checkout.
+
+```powershell
+.\scripts\build-android-playstore.ps1 -Flavor independent
+.\scripts\build-android-playstore.ps1 -Flavor playstore -Mode debug
+```
+
+The independent release APK is written below:
+
+```text
+mobile\apps\photos\build\app\outputs\flutter-apk\app-independent-release.apk
+```
+
+To run the commands manually, build the Play Store release APK as follows:
 
 ```powershell
 Set-Location "$Repo\mobile\apps\photos"
 & "$FlutterBin\flutter.bat" pub get
 & "$FlutterBin\flutter.bat" analyze
-& "$FlutterBin\flutter.bat" build apk --debug --flavor playstore
+& "$FlutterBin\flutter.bat" build apk --release --flavor playstore
 ```
 
 The APK is written below:
 
 ```text
-mobile\apps\photos\build\app\outputs\flutter-apk\app-playstore-debug.apk
+mobile\apps\photos\build\app\outputs\flutter-apk\app-playstore-release.apk
 ```
 
 `home_widget 0.8.0` declares `androidx.glance:glance-appwidget:1.+`. The app's
@@ -59,7 +84,19 @@ Gradle select `1.3.0-alpha02`, which requires compileSdk 37 and AGP 9.1 and
 breaks this checkout's AGP 8.6 build.
 
 Release builds additionally require the Ente signing properties and keystore.
-Do not substitute the debug keystore or an unrelated repository key.
+Configure `mobile\apps\photos\android\key.properties`, or set all four
+environment variables below before invoking the script:
+
+```text
+SIGNING_KEY_PATH
+SIGNING_KEY_ALIAS
+SIGNING_KEY_PASSWORD
+SIGNING_STORE_PASSWORD
+```
+
+The script stops before dependency and Gradle work when neither signing source
+is present. Do not substitute the debug keystore or an unrelated repository
+key.
 
 ## Desktop Photos with Jasna
 

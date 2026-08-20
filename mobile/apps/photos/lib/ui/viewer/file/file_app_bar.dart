@@ -26,7 +26,6 @@ import 'package:photos/services/collections_service.dart';
 import "package:photos/services/desktop_stream_recreate_service.dart";
 import 'package:photos/services/hidden_service.dart';
 import "package:photos/services/local_authentication_service.dart";
-import "package:photos/services/video_preview_service.dart";
 import "package:photos/states/detail_page_state.dart";
 import "package:photos/theme/colors.dart";
 import "package:photos/theme/ente_theme.dart";
@@ -458,17 +457,6 @@ class FileAppBarState extends State<FileAppBar> {
 
     if (widget.file.isVideo && !restrictFileActions) {
       // Video streaming options
-      if (_shouldShowCreateStreamOption()) {
-        items.add(
-          EntePopupMenuItem(
-            AppLocalizations.of(context).createStream,
-            value: 8,
-            icon: Icons.video_settings_outlined,
-            iconColor: Theme.of(context).iconTheme.color,
-          ),
-        );
-      }
-
       if (_shouldShowRecreateStreamOption()) {
         items.add(
           EntePopupMenuItem(
@@ -537,23 +525,10 @@ class FileAppBarState extends State<FileAppBar> {
               await _handleUnHideRequest(context);
             } else if (value == 6) {
               await _onTapGuestView();
-            } else if (value == 99) {
-              try {
-                await VideoPreviewService.instance.chunkAndUploadVideo(
-                  context,
-                  widget.file,
-                );
-              } catch (e) {
-                if (mounted) {
-                  await showGenericErrorDialog(context: context, error: e);
-                }
-              }
             } else if (value == 7) {
               _onToggleLoopVideo();
-            } else if (value == 8) {
-              await _handleVideoStream('create');
             } else if (value == 9) {
-              await _handleVideoStream('recreate');
+              await _requestDesktopStreamRecreation();
             } else if (value == 11) {
               widget.onEditRequested(widget.file);
             } else if (value == 12) {
@@ -769,17 +744,10 @@ class FileAppBarState extends State<FileAppBar> {
     }
   }
 
-  bool _shouldShowCreateStreamOption() {
-    // Show "Create Stream" option for uploaded video files without streams
-    return _ensureBasicRequirements() &&
-        VideoPreviewService.instance.isVideoStreamingEnabled &&
-        !fileDataService.previewIds.containsKey(widget.file.uploadedFileID!);
-  }
-
   bool _shouldShowRecreateStreamOption() {
-    // Show "Recreate Stream" option for uploaded video files with existing streams
-    return _ensureBasicRequirements() &&
-        fileDataService.previewIds.containsKey(widget.file.uploadedFileID!);
+    // A desktop request is valid whether a previous preview exists or not.
+    // Do not gate this action on the Android streamable-videos preference.
+    return _ensureBasicRequirements();
   }
 
   bool _ensureBasicRequirements() {
@@ -792,14 +760,10 @@ class FileAppBarState extends State<FileAppBar> {
         widget.file.ownerID == userId;
   }
 
-  Future<void> _handleVideoStream(String streamType) async {
+  Future<void> _requestDesktopStreamRecreation() async {
     try {
-      final bool wasAdded = streamType == 'recreate'
-          ? await DesktopStreamRecreateService.instance.request(widget.file)
-          : await VideoPreviewService.instance.addToManualQueue(
-              widget.file,
-              streamType,
-            );
+      final bool wasAdded =
+          await DesktopStreamRecreateService.instance.request(widget.file);
 
       if (!wasAdded) {
         // File was already in queue
@@ -818,7 +782,7 @@ class FileAppBarState extends State<FileAppBar> {
         });
       }
     } catch (e, s) {
-      _logger.severe("Failed to $streamType video stream", e, s);
+      _logger.severe("Failed to request desktop stream recreation", e, s);
       await showGenericErrorDialog(context: context, error: e);
     }
   }
