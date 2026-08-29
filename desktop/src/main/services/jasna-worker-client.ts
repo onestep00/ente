@@ -1070,7 +1070,13 @@ const runJasnaHLSJobUnlocked = async (job: JasnaJob) => {
                 await clearJobOutput(job.outputDir);
         }
     }
-    throw lastError;
+    // Source failures return above. Exhausting retries for every other failure
+    // means the shared worker is unavailable, not that the video is bad. Mark
+    // it explicitly so the renderer retries the file after a cooldown instead
+    // of persisting a false source failure.
+    throw new Error(`ENTE_JASNA_UNAVAILABLE: ${String(lastError)}`, {
+        cause: lastError,
+    });
 };
 
 export const runJasnaHLSJob = async (job: JasnaJob) => {

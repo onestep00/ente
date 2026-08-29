@@ -47,6 +47,7 @@ import {
     mapWithConcurrency,
     PlaylistJSON,
     shouldRecreateInvalidPlaylistForJasnaMigration,
+    TransientRetryTracker,
     type PlaylistJSON as PlaylistJSONType,
 } from "./video-queue";
 
@@ -99,6 +100,18 @@ const progressPollIntervalMs = 2000;
 const processingPipelineWidth = 2;
 // processQueue is a singleton, so this is also the process-wide discovery cap.
 const maxConcurrentPlaylistInspections = 8;
+const sourceRetryDelayMs = 2 * 1000;
+const transientRetryInitialDelayMs = 30 * 1000;
+const transientRetryMaximumDelayMs = 10 * 60 * 1000;
+
+class PersistedVideoFailureError extends Error {
+    constructor(cause: unknown) {
+        super(cause instanceof Error ? cause.message : String(cause), {
+            cause,
+        });
+        this.name = "PersistedVideoFailureError";
+    }
+}
 
 /**
  * Internal in-memory state shared by the functions in this module.
@@ -167,6 +180,8 @@ class VideoState {
      * Reset back to {@link idleWaitInitial} in case of any activity.
      */
     idleWait = idleWaitInitial;
+    /** Last backfill summary written to the log, used to suppress duplicates. */
+    lastBackfillSnapshot: string | undefined;
     /**
      * `true` if we have synced at least once with remote.
      *
@@ -1060,10 +1075,12 @@ const processQueue = async () => {
 
     const userID = ensureLocalUser().id;
 
-    // We mark failures in the local DB for in expected failure mode. As an
-    // additional protection against loops in unforeseen scenarios, keep a
-    // transient in-memory list of IDs which shouldn't be looped.
-    const transientFailedFileIDs = new Set<number>();
+    // Permanent source failures are stored in the local DB. Transient failures
+    // use a bounded cooldown so they are retried without creating a hot loop.
+    const transientRetries = new TransientRetryTracker(
+        transientRetryInitialDelayMs,
+        transientRetryMaximumDelayMs,
+    );
 
     let bq: typeof _state.liveQueue | undefined;
     const active = new Map<Promise<void>, VideoProcessingQueueItem>();
@@ -1099,6 +1116,7 @@ const processQueue = async () => {
         }
 
         const task = (async () => {
+            let shouldRequeue = false;
             try {
                 await processQueueItem(item);
                 if (item.remoteRecreateRequest !== undefined) {
@@ -1112,10 +1130,19 @@ const processQueue = async () => {
                     );
                 }
                 await markProcessedVideoFileID(item.file.id);
+                transientRetries.clear(item.file.id);
                 _state.idleWait = idleWaitInitial;
             } catch (e) {
                 log.error(`Failed to process video ${fileLogID(item.file)}`, e);
-                transientFailedFileIDs.add(item.file.id);
+                if (e instanceof PersistedVideoFailureError) {
+                    transientRetries.clear(item.file.id);
+                } else {
+                    const retry = transientRetries.recordFailure(item.file.id);
+                    shouldRequeue = true;
+                    log.warn(
+                        `HLS queue | retry file=${item.file.id} attempt=${retry.attempt} after=${Math.ceil(retry.delayMs / 1000)}s`,
+                    );
+                }
             } finally {
                 for (const [activeTask, activeItem] of active) {
                     if (activeItem === item) {
@@ -1125,6 +1152,7 @@ const processQueue = async () => {
                 }
                 activeFileIDs.delete(item.file.id);
                 _state.activeVideoItems.delete(item.file.id);
+                if (shouldRequeue) enqueueVideoProcessingItems([item]);
                 _state.processingDone = (_state.processingDone ?? 0) + 1;
                 if (_state.currentFileID == item.file.id) {
                     const next = active.values().next().value;
@@ -1142,9 +1170,11 @@ const processQueue = async () => {
     while (isHLSGenerationEnabled() || hasPendingRemoteRecreateWork()) {
         let loadedBackfill = false;
         while (active.size < processingPipelineWidth) {
+            const coolingFileIDs = transientRetries.blockedFileIDs();
             const liveIndex = _state.liveQueue.findIndex(
                 (candidate) =>
                     !activeFileIDs.has(candidate.file.id) &&
+                    !coolingFileIDs.has(candidate.file.id) &&
                     (isHLSGenerationEnabled() ||
                         candidate.remoteRecreateRequest !== undefined),
             );
@@ -1161,7 +1191,7 @@ const processQueue = async () => {
                 loadedBackfill = true;
                 if (_state.haveSyncedOnce) {
                     const excludedFileIDs = new Set([
-                        ...transientFailedFileIDs,
+                        ...coolingFileIDs,
                         ...activeFileIDs,
                     ]);
                     try {
@@ -1186,12 +1216,6 @@ const processQueue = async () => {
                 }
             }
             if (!item) break;
-            if (
-                transientFailedFileIDs.has(item.file.id) &&
-                !item.forceRecreate
-            ) {
-                continue;
-            }
             startItem(item);
         }
 
@@ -1201,8 +1225,13 @@ const processQueue = async () => {
             resetProcessingStats();
             updateSnapshotIfNeeded("idle");
 
-            const idleWait = _state.idleWait;
-            _state.idleWait = Math.min(idleWait * 2, idleWaitMax);
+            const configuredIdleWait = _state.idleWait;
+            _state.idleWait = Math.min(configuredIdleWait * 2, idleWaitMax);
+            const nextRetryDelay = transientRetries.nextDelay();
+            const idleWait =
+                nextRetryDelay !== undefined
+                    ? Math.min(configuredIdleWait, nextRetryDelay)
+                    : configuredIdleWait;
 
             // `tick` allows the sleep to be interrupted when there is
             // potential activity.
@@ -1349,26 +1378,27 @@ const backfillQueue = async (
 ): Promise<VideoProcessingQueueItem[]> => {
     const allCollectionFiles = await savedCollectionFiles();
     const localTrashFileIDs = await savedTrashItemFileIDs();
-    const videoFiles = excludeFilesByID(
-        uniqueFilesByID(
-            allCollectionFiles.filter(
-                (f) =>
-                    // Only files the user owns.
-                    f.ownerID == userID &&
-                    // Only videos.
-                    f.metadata.fileType == FileType.video &&
-                    // Not in trash.
-                    !localTrashFileIDs.has(f.id) &&
-                    // See: [Note: Marking files which do not need video processing]
-                    f.pubMagicMetadata?.data.sv != 1,
-            ),
+    const allVideoFiles = uniqueFilesByID(
+        allCollectionFiles.filter(
+            (f) =>
+                // Only files the user owns.
+                f.ownerID == userID &&
+                // Only videos.
+                f.metadata.fileType == FileType.video &&
+                // Not in trash.
+                !localTrashFileIDs.has(f.id) &&
+                // See: [Note: Marking files which do not need video processing]
+                f.pubMagicMetadata?.data.sv != 1,
         ),
-        excludedFileIDs,
     );
+    const videoFiles = excludeFilesByID(allVideoFiles, excludedFileIDs);
 
     const processedIDs = await savedProcessedVideoFileIDs();
     const failedIDs = await savedFailedVideoFileIDs();
     const doneIDs = processedIDs.union(failedIDs);
+    const allPendingVideoCount = allVideoFiles.filter(
+        (file) => !doneIDs.has(file.id),
+    ).length;
     const pendingVideoFiles = videoFiles.filter((f) => !doneIDs.has(f.id));
 
     const maxBatchSize = 50;
@@ -1397,6 +1427,27 @@ const backfillQueue = async (
             maxBatchSize - batch.length,
         );
         batch = [...batch, ...extraPending];
+    }
+    const processedVideoCount = allVideoFiles.filter((file) =>
+        processedIDs.has(file.id),
+    ).length;
+    const failedVideoCount = allVideoFiles.filter((file) =>
+        failedIDs.has(file.id),
+    ).length;
+    const snapshot = [
+        allVideoFiles.length,
+        allPendingVideoCount,
+        processedVideoCount,
+        failedVideoCount,
+        excludedFileIDs.size,
+        lowQualityBatch.length,
+        batch.length,
+    ].join("/");
+    if (_state.lastBackfillSnapshot != snapshot) {
+        _state.lastBackfillSnapshot = snapshot;
+        log.info(
+            `HLS backfill | videos=${allVideoFiles.length} pending=${allPendingVideoCount} processed=${processedVideoCount} failed=${failedVideoCount} excluded=${excludedFileIDs.size} recreate=${lowQualityBatch.length} selected=${batch.length}`,
+        );
     }
     return batch.map((file) => ({ file }));
 };
@@ -1598,6 +1649,7 @@ const processQueueItem = async ({
                         `Generate HLS for ${fileLogID(file)} | source retry ${attempt}/${maximumSourceAttempts}`,
                         e,
                     );
+                    await wait(sourceRetryDelayMs);
                     continue;
                 }
                 throw e;
@@ -1619,8 +1671,10 @@ const processQueueItem = async ({
             !(e instanceof JasnaUnavailableError) &&
             !(e instanceof SourcePreparationError) &&
             !isNetworkDownloadError(e)
-        )
+        ) {
             await markFailedVideoFile(file);
+            throw new PersistedVideoFailureError(e);
+        }
         throw e;
     } finally {
         stopProgressPolling();
@@ -1659,7 +1713,10 @@ const processQueueItem = async ({
                 videoSize,
             );
         } catch (e) {
-            if (isHTTP4xxError(e)) await markFailedVideoFile(file);
+            if (isHTTP4xxError(e)) {
+                await markFailedVideoFile(file);
+                throw new PersistedVideoFailureError(e);
+            }
             throw e;
         }
 

@@ -42,6 +42,76 @@ export const excludeFilesByID = <T extends { id: number }>(
     excludedIDs: ReadonlySet<number>,
 ) => files.filter((file) => !excludedIDs.has(file.id));
 
+interface RetryState {
+    failures: number;
+    retryAt: number;
+    released: boolean;
+}
+
+export interface RecordedRetry {
+    attempt: number;
+    delayMs: number;
+    retryAt: number;
+}
+
+/**
+ * Apply bounded exponential backoff without excluding a transient failure for
+ * the lifetime of the queue processor.
+ */
+export class TransientRetryTracker {
+    private states = new Map<number, RetryState>();
+
+    constructor(
+        private initialDelayMs: number,
+        private maximumDelayMs: number,
+    ) {
+        if (
+            !Number.isFinite(initialDelayMs) ||
+            initialDelayMs <= 0 ||
+            !Number.isFinite(maximumDelayMs) ||
+            maximumDelayMs < initialDelayMs
+        ) {
+            throw new RangeError("Invalid transient retry delays");
+        }
+    }
+
+    recordFailure(fileID: number, now = Date.now()): RecordedRetry {
+        const attempt = (this.states.get(fileID)?.failures ?? 0) + 1;
+        const delayMs = Math.min(
+            this.maximumDelayMs,
+            this.initialDelayMs * 2 ** Math.min(attempt - 1, 30),
+        );
+        const retryAt = now + delayMs;
+        this.states.set(fileID, {
+            failures: attempt,
+            retryAt,
+            released: false,
+        });
+        return { attempt, delayMs, retryAt };
+    }
+
+    clear(fileID: number) {
+        this.states.delete(fileID);
+    }
+
+    blockedFileIDs(now = Date.now()) {
+        const blocked = new Set<number>();
+        for (const [fileID, state] of this.states) {
+            if (state.released) continue;
+            if (state.retryAt > now) blocked.add(fileID);
+            else state.released = true;
+        }
+        return blocked;
+    }
+
+    nextDelay(now = Date.now()) {
+        const delays = Array.from(this.states.values())
+            .filter(({ released }) => !released)
+            .map(({ retryAt }) => Math.max(0, retryAt - now));
+        return delays.length ? Math.min(...delays) : undefined;
+    }
+}
+
 export const mapWithConcurrency = async <T, R>(
     values: readonly T[],
     concurrency: number,

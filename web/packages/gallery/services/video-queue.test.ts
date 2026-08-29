@@ -4,6 +4,7 @@ import {
     mapWithConcurrency,
     PlaylistJSON,
     shouldRecreateInvalidPlaylistForJasnaMigration,
+    TransientRetryTracker,
 } from "./video-queue";
 
 describe("shouldRecreateInvalidPlaylistForJasnaMigration", () => {
@@ -135,4 +136,46 @@ test("mapWithConcurrency rejects an invalid limit", async () => {
     await expect(
         mapWithConcurrency([1], 0, (value) => Promise.resolve(value)),
     ).rejects.toThrow("Concurrency must be a positive integer");
+});
+
+test("TransientRetryTracker retries after bounded exponential backoff", () => {
+    const retries = new TransientRetryTracker(100, 400);
+
+    expect(retries.recordFailure(1, 1_000)).toEqual({
+        attempt: 1,
+        delayMs: 100,
+        retryAt: 1_100,
+    });
+    expect(retries.blockedFileIDs(1_099)).toEqual(new Set([1]));
+    expect(retries.blockedFileIDs(1_100)).toEqual(new Set());
+
+    expect(retries.recordFailure(1, 1_100).delayMs).toBe(200);
+    expect(retries.recordFailure(1, 1_300).delayMs).toBe(400);
+    expect(retries.recordFailure(1, 1_700).delayMs).toBe(400);
+    expect(retries.nextDelay(1_800)).toBe(300);
+
+    retries.clear(1);
+    expect(retries.blockedFileIDs(1_800)).toEqual(new Set());
+    expect(retries.nextDelay(1_800)).toBeUndefined();
+    expect(retries.recordFailure(1, 2_000).attempt).toBe(1);
+});
+
+test("TransientRetryTracker wakes for the earliest pending retry", () => {
+    const retries = new TransientRetryTracker(100, 400);
+    retries.recordFailure(1, 1_000);
+    retries.recordFailure(2, 1_050);
+
+    expect(retries.nextDelay(1_075)).toBe(25);
+    expect(retries.blockedFileIDs(1_100)).toEqual(new Set([2]));
+});
+
+test("TransientRetryTracker wakes immediately if a retry expires during discovery", () => {
+    const retries = new TransientRetryTracker(100, 400);
+    retries.recordFailure(1, 1_000);
+
+    expect(retries.blockedFileIDs(1_099)).toEqual(new Set([1]));
+    expect(retries.nextDelay(1_101)).toBe(0);
+
+    expect(retries.blockedFileIDs(1_101)).toEqual(new Set());
+    expect(retries.nextDelay(1_101)).toBeUndefined();
 });
