@@ -20,7 +20,6 @@ import { gunzip, gzip } from "ente-new/photos/utils/gzip";
 import { randomSample } from "ente-utils/array";
 import { ensurePrecondition } from "ente-utils/ensure";
 import { wait } from "ente-utils/promise";
-import { z } from "zod";
 import {
     initiateGenerateHLS,
     isJasnaStreamProcessingConfigured,
@@ -43,6 +42,13 @@ import {
     type ProcessableUploadItem,
     type TimestampedFileSystemUploadItem,
 } from "./upload";
+import {
+    excludeFilesByID,
+    mapWithConcurrency,
+    PlaylistJSON,
+    shouldRecreateInvalidPlaylistForJasnaMigration,
+    type PlaylistJSON as PlaylistJSONType,
+} from "./video-queue";
 
 export type HLSGenerationEnabledStatus = "processing" | "idle";
 
@@ -91,6 +97,8 @@ const recreateSourceMinRatio = 0.8;
 const bitrateCapHeadroom = 1.3;
 const progressPollIntervalMs = 2000;
 const processingPipelineWidth = 2;
+// processQueue is a singleton, so this is also the process-wide discovery cap.
+const maxConcurrentPlaylistInspections = 8;
 
 /**
  * Internal in-memory state shared by the functions in this module.
@@ -529,45 +537,22 @@ export const hlsPlaylistDataForFile = async (
     return { playlistURL, width, height, generator };
 };
 
-const PlaylistJSON = z.object({
-    /**
-     * The type of the playlist.
-     *
-     * The only value we currently understand on this client is "hls_video", but
-     * for future extensibility this might be other values too.
-     */
-    type: z.string(),
-    /**
-     * The HLS playlist, as a string.
-     */
-    playlist: z.string(),
-    /**
-     * The width of the video (px).
-     */
-    width: z.number(),
-    /**
-     * The height of the video (px).
-     */
-    height: z.number(),
-    /**
-     * The size (in bytes) of the corresponding file containing the video
-     * segments that the playlist refers to.
-     */
-    size: z.number(),
-    /** The versioned pipeline which generated this stream. */
-    generator: z.string().optional(),
-});
-
-type PlaylistJSON = z.infer<typeof PlaylistJSON>;
-
-const decryptPlaylistJSON = async (
+const decryptPlaylistJSONObject = async (
     encryptedPlaylist: EncryptedBlob,
     file: EnteFile,
 ) => {
     const decryptedBytes = await decryptBlobBytes(encryptedPlaylist, file.key);
     const jsonString = await gunzip(decryptedBytes);
-    return PlaylistJSON.parse(JSON.parse(jsonString));
+    return JSON.parse(jsonString) as unknown;
 };
+
+const decryptPlaylistJSON = async (
+    encryptedPlaylist: EncryptedBlob,
+    file: EnteFile,
+) =>
+    PlaylistJSON.parse(
+        await decryptPlaylistJSONObject(encryptedPlaylist, file),
+    );
 
 /**
  * Convert a blob to a `data:` URL.
@@ -1175,7 +1160,21 @@ const processQueue = async () => {
             ) {
                 loadedBackfill = true;
                 if (_state.haveSyncedOnce) {
-                    bq = await backfillQueue(userID);
+                    const excludedFileIDs = new Set([
+                        ...transientFailedFileIDs,
+                        ...activeFileIDs,
+                    ]);
+                    try {
+                        bq = await backfillQueue(userID, excludedFileIDs);
+                    } catch (e) {
+                        // With no queued item, the outer loop enters its idle
+                        // wait and retries this lookup on the next iteration.
+                        bq = [];
+                        log.warn(
+                            "Failed to determine HLS backfill queue; will retry after idle wait",
+                            e,
+                        );
+                    }
                 } else if (active.size == 0) {
                     log.info("Not attempting backfill until first sync");
                 }
@@ -1233,10 +1232,27 @@ const shouldRecreateLowQualityStream = async (
     file: EnteFile,
     playlistFileData: EncryptedBlob,
 ) => {
-    const { type, size, generator } = await decryptPlaylistJSON(
+    const playlistJSON = await decryptPlaylistJSONObject(
         playlistFileData,
         file,
     );
+    const parsedPlaylist = PlaylistJSON.safeParse(playlistJSON);
+    if (!parsedPlaylist.success) {
+        if (
+            shouldRecreateInvalidPlaylistForJasnaMigration(
+                _state.jasnaConfigured,
+                playlistJSON,
+                parsedPlaylist.error,
+            )
+        ) {
+            log.info(
+                `Generate HLS for ${fileLogID(file)} | recreate-invalid-dimensions`,
+            );
+            return true;
+        }
+        throw parsedPlaylist.error;
+    }
+    const { type, size, generator } = parsedPlaylist.data;
     if (type != "hls_video") return false;
     if (_state.jasnaConfigured && generator != jasnaStreamGenerator)
         return true;
@@ -1290,8 +1306,10 @@ const selectLowQualityRecreateCandidates = async (
     } else {
         sample = randomSample(eligible, sampleSize);
     }
-    const results = await Promise.all(
-        sample.map(async (file) => {
+    const results = await mapWithConcurrency(
+        sample,
+        maxConcurrentPlaylistInspections,
+        async (file) => {
             try {
                 const playlistFileData = await fetchFileData(
                     "vid_preview",
@@ -1309,7 +1327,7 @@ const selectLowQualityRecreateCandidates = async (
                 );
             }
             return undefined;
-        }),
+        },
     );
 
     return results
@@ -1327,21 +1345,25 @@ const selectLowQualityRecreateCandidates = async (
  */
 const backfillQueue = async (
     userID: number,
+    excludedFileIDs: ReadonlySet<number>,
 ): Promise<VideoProcessingQueueItem[]> => {
     const allCollectionFiles = await savedCollectionFiles();
     const localTrashFileIDs = await savedTrashItemFileIDs();
-    const videoFiles = uniqueFilesByID(
-        allCollectionFiles.filter(
-            (f) =>
-                // Only files the user owns.
-                f.ownerID == userID &&
-                // Only videos.
-                f.metadata.fileType == FileType.video &&
-                // Not in trash.
-                !localTrashFileIDs.has(f.id) &&
-                // See: [Note: Marking files which do not need video processing]
-                f.pubMagicMetadata?.data.sv != 1,
+    const videoFiles = excludeFilesByID(
+        uniqueFilesByID(
+            allCollectionFiles.filter(
+                (f) =>
+                    // Only files the user owns.
+                    f.ownerID == userID &&
+                    // Only videos.
+                    f.metadata.fileType == FileType.video &&
+                    // Not in trash.
+                    !localTrashFileIDs.has(f.id) &&
+                    // See: [Note: Marking files which do not need video processing]
+                    f.pubMagicMetadata?.data.sv != 1,
+            ),
         ),
+        excludedFileIDs,
     );
 
     const processedIDs = await savedProcessedVideoFileIDs();
@@ -1656,5 +1678,5 @@ const processQueueItem = async ({
  * It is a trivial function, the main utility it provides is that it forces us
  * to conform to the {@link PlaylistJSON} type.
  */
-const encodePlaylistJSON = (playlistJSON: PlaylistJSON) =>
+const encodePlaylistJSON = (playlistJSON: PlaylistJSONType) =>
     gzip(JSON.stringify(playlistJSON));
