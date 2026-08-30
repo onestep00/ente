@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 import {
+    collectCandidatesInBatches,
     excludeFilesByID,
     mapWithConcurrency,
     PlaylistJSON,
@@ -136,6 +137,42 @@ test("mapWithConcurrency rejects an invalid limit", async () => {
     await expect(
         mapWithConcurrency([1], 0, (value) => Promise.resolve(value)),
     ).rejects.toThrow("Concurrency must be a positive integer");
+});
+
+test("collectCandidatesInBatches continues past sparse empty batches", async () => {
+    const values = Array.from({ length: 600 }, (_, index) => index + 1);
+    const inspected: number[][] = [];
+
+    const candidates = await collectCandidatesInBatches(
+        values,
+        200,
+        50,
+        (batch) => {
+            inspected.push([...batch]);
+            return Promise.resolve(batch.filter((value) => value > 450));
+        },
+    );
+
+    expect(inspected).toHaveLength(3);
+    expect(candidates).toEqual(
+        Array.from({ length: 50 }, (_, index) => index + 451),
+    );
+});
+
+test("collectCandidatesInBatches stops when the queue quota is full", async () => {
+    const inspectBatch = vi.fn((batch: readonly number[]) =>
+        Promise.resolve(batch),
+    );
+
+    await expect(
+        collectCandidatesInBatches(
+            Array.from({ length: 600 }, (_, index) => index + 1),
+            200,
+            50,
+            inspectBatch,
+        ),
+    ).resolves.toEqual(Array.from({ length: 50 }, (_, index) => index + 1));
+    expect(inspectBatch).toHaveBeenCalledTimes(1);
 });
 
 test("TransientRetryTracker retries after bounded exponential backoff", () => {

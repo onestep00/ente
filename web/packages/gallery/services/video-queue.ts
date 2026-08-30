@@ -133,3 +133,34 @@ export const mapWithConcurrency = async <T, R>(
     );
     return results;
 };
+
+/**
+ * Inspect consecutive batches until enough candidates are found or every value
+ * has been inspected. This avoids treating an empty sparse sample as an empty
+ * population.
+ */
+export const collectCandidatesInBatches = async <T>(
+    values: readonly T[],
+    batchSize: number,
+    maxResults: number,
+    inspectBatch: (batch: readonly T[]) => Promise<readonly T[]>,
+) => {
+    if (!Number.isInteger(batchSize) || batchSize < 1)
+        throw new RangeError("Batch size must be a positive integer");
+    if (!Number.isInteger(maxResults) || maxResults < 0)
+        throw new RangeError("Maximum results must be a non-negative integer");
+
+    const results: T[] = [];
+    for (
+        let offset = 0;
+        offset < values.length && results.length < maxResults;
+        offset += batchSize
+    ) {
+        const remaining = maxResults - results.length;
+        const candidates = await inspectBatch(
+            values.slice(offset, offset + batchSize),
+        );
+        results.push(...candidates.slice(0, remaining));
+    }
+    return results;
+};

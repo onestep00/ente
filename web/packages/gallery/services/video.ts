@@ -34,6 +34,7 @@ import { downloadManager, isNetworkDownloadError } from "./download";
 import {
     fetchFileData,
     fetchFilePreviewData,
+    fetchFilesData,
     putVideoData,
     syncUpdatedFileDataFileIDs,
 } from "./file-data";
@@ -43,6 +44,7 @@ import {
     type TimestampedFileSystemUploadItem,
 } from "./upload";
 import {
+    collectCandidatesInBatches,
     excludeFilesByID,
     mapWithConcurrency,
     PlaylistJSON,
@@ -100,6 +102,8 @@ const progressPollIntervalMs = 2000;
 const processingPipelineWidth = 2;
 // processQueue is a singleton, so this is also the process-wide discovery cap.
 const maxConcurrentPlaylistInspections = 8;
+const playlistFetchBatchSize = 200;
+const videoPreviewFailurePolicyVersion = 1;
 const sourceRetryDelayMs = 2 * 1000;
 const transientRetryInitialDelayMs = 30 * 1000;
 const transientRetryMaximumDelayMs = 10 * 60 * 1000;
@@ -123,8 +127,8 @@ class VideoState {
     jasnaConfigured = false;
     /** Completed remote requests awaiting a successful metadata acknowledgement. */
     completedRemoteRecreateRequests = new Map<number, number>();
-    /** Next index for a bounded, deterministic scan of existing previews. */
-    jasnaMigrationCursor = 0;
+    /** Existing previews already verified against the current Jasna generator. */
+    jasnaMigrationVerifiedFileIDs = new Set<number>();
     /**
      * `true` if the generation of HLS streams has been enabled on this client.
      */
@@ -629,6 +633,25 @@ const saveProcessedVideoFileIDs = (videoFileIDs: Set<number>) =>
 const saveFailedVideoFileIDs = (videoFileIDs: Set<number>) =>
     setKV("videoPreviewFailedFileIDs", Array.from(videoFileIDs));
 
+/** Re-evaluate failures persisted by the older, broader failure classifier. */
+const migrateVideoPreviewFailureStateIfNeeded = async () => {
+    const savedVersion =
+        (await getKVN("videoPreviewFailurePolicyVersion")) ?? 0;
+    if (savedVersion >= videoPreviewFailurePolicyVersion) return;
+
+    const failedIDs = await savedFailedVideoFileIDs();
+    if (failedIDs.size > 0) {
+        await saveFailedVideoFileIDs(new Set());
+        log.info(
+            `Reset ${failedIDs.size} saved video preview failure(s) for policy version ${videoPreviewFailurePolicyVersion}`,
+        );
+    }
+    await setKV(
+        "videoPreviewFailurePolicyVersion",
+        videoPreviewFailurePolicyVersion,
+    );
+};
+
 /**
  * Mark the provided file ID as having been processed to generate a video
  * preview.
@@ -706,6 +729,8 @@ const pullProcessedFileIDs = async () =>
         "vid_preview",
         (await savedSyncLastUpdatedAt()) ?? 0,
         async ({ fileIDs, lastUpdatedAt }) => {
+            for (const fileID of fileIDs)
+                _state.jasnaMigrationVerifiedFileIDs.delete(fileID);
             await Promise.all([
                 markProcessedVideoFileIDs(fileIDs),
                 saveSyncLastUpdatedAt(lastUpdatedAt),
@@ -775,6 +800,7 @@ export const videoProcessingSyncIfNeeded = async () => {
         _state.jasnaConfigured =
             await isJasnaStreamProcessingConfigured(ensureElectron());
 
+        await migrateVideoPreviewFailureStateIfNeeded();
         await pullProcessedFileIDs();
     }
 
@@ -1322,19 +1348,68 @@ const selectLowQualityRecreateCandidates = async (
         : files.filter((file) => file.metadata.duration && file.info?.fileSize);
     if (eligible.length === 0) return [];
 
-    const sampleSize = Math.min(eligible.length, Math.max(50, maxResults * 5));
-    let sample: EnteFile[];
     if (_state.jasnaConfigured) {
-        const sorted = eligible.toSorted((a, b) => a.id - b.id);
-        const start = _state.jasnaMigrationCursor % sorted.length;
-        sample = Array.from(
-            { length: sampleSize },
-            (_, offset) => sorted[(start + offset) % sorted.length]!,
+        const unchecked = eligible
+            .toSorted((a, b) => a.id - b.id)
+            .filter(
+                (file) => !_state.jasnaMigrationVerifiedFileIDs.has(file.id),
+            );
+        let inspectedCount = 0;
+        const candidates = await collectCandidatesInBatches(
+            unchecked,
+            playlistFetchBatchSize,
+            maxResults,
+            async (batch) => {
+                inspectedCount += batch.length;
+                const playlistDataByFileID = new Map(
+                    (
+                        await fetchFilesData(
+                            "vid_preview",
+                            batch.map((file) => file.id),
+                        )
+                    ).map((data) => [data.fileID, data]),
+                );
+                const results = await mapWithConcurrency(
+                    batch,
+                    maxConcurrentPlaylistInspections,
+                    async (file) => {
+                        const playlistFileData = playlistDataByFileID.get(
+                            file.id,
+                        );
+                        if (!playlistFileData) return undefined;
+                        try {
+                            if (
+                                await shouldRecreateLowQualityStream(
+                                    file,
+                                    playlistFileData,
+                                )
+                            )
+                                return file;
+                            _state.jasnaMigrationVerifiedFileIDs.add(file.id);
+                        } catch (e) {
+                            log.warn(
+                                `Generate HLS for ${fileLogID(file)} | recreate-check failed`,
+                                e,
+                            );
+                        }
+                        return undefined;
+                    },
+                );
+                return results.filter((file): file is EnteFile =>
+                    Boolean(file),
+                );
+            },
         );
-        _state.jasnaMigrationCursor = (start + sampleSize) % sorted.length;
-    } else {
-        sample = randomSample(eligible, sampleSize);
+        if (inspectedCount > 0) {
+            log.info(
+                `HLS migration scan | inspected=${inspectedCount} unchecked=${unchecked.length} candidates=${candidates.length}`,
+            );
+        }
+        return candidates;
     }
+
+    const sampleSize = Math.min(eligible.length, Math.max(50, maxResults * 5));
+    const sample = randomSample(eligible, sampleSize);
     const results = await mapWithConcurrency(
         sample,
         maxConcurrentPlaylistInspections,
