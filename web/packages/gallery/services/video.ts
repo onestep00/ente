@@ -22,9 +22,9 @@ import { ensurePrecondition } from "ente-utils/ensure";
 import { wait } from "ente-utils/promise";
 import {
     initiateGenerateHLS,
-    isJasnaStreamProcessingConfigured,
     JasnaUnavailableError,
     readGenerateHLSProgress,
+    readJasnaStreamProcessingStatus,
     readVideoStream,
     SourcePreparationError,
     videoStreamDone,
@@ -94,16 +94,16 @@ const idleWaitInitial = 10 * 1000; /* 10 sec */
 const idleWaitMax = idleWaitInitial * 2 ** 6; /* 640 sec */
 const hlsTargetMinBitrate = 4000 * 1000;
 const hlsTargetMaxBitrate = 8000 * 1000;
-const jasnaStreamGenerator = "jasna-ente-v5";
 const recreateStreamMinRatio = 0.5;
 const recreateSourceMinRatio = 0.8;
 const bitrateCapHeadroom = 1.3;
 const progressPollIntervalMs = 2000;
-const processingPipelineWidth = 2;
+const standardProcessingPipelineWidth = 2;
+const jasnaProcessingPipelineWidth = 8;
 // processQueue is a singleton, so this is also the process-wide discovery cap.
 const maxConcurrentPlaylistInspections = 8;
 const playlistFetchBatchSize = 200;
-const videoPreviewFailurePolicyVersion = 1;
+const videoPreviewFailurePolicyVersion = 2;
 const sourceRetryDelayMs = 2 * 1000;
 const transientRetryInitialDelayMs = 30 * 1000;
 const transientRetryMaximumDelayMs = 10 * 60 * 1000;
@@ -125,6 +125,10 @@ class PersistedVideoFailureError extends Error {
 class VideoState {
     /** Whether this desktop process has Jasna stream processing configured. */
     jasnaConfigured = false;
+    /** Whether the configured Jasna uses the native concurrent job contract. */
+    jasnaConcurrent = false;
+    /** Generator emitted by the currently configured Jasna execution mode. */
+    jasnaGenerator: string | undefined;
     /** Completed remote requests awaiting a successful metadata acknowledgement. */
     completedRemoteRecreateRequests = new Map<number, number>();
     /** Existing previews already verified against the current Jasna generator. */
@@ -633,7 +637,7 @@ const saveProcessedVideoFileIDs = (videoFileIDs: Set<number>) =>
 const saveFailedVideoFileIDs = (videoFileIDs: Set<number>) =>
     setKV("videoPreviewFailedFileIDs", Array.from(videoFileIDs));
 
-/** Re-evaluate failures persisted by the older, broader failure classifier. */
+/** Re-evaluate failures saved before the native Jasna v6 failure policy. */
 const migrateVideoPreviewFailureStateIfNeeded = async () => {
     const savedVersion =
         (await getKVN("videoPreviewFailurePolicyVersion")) ?? 0;
@@ -796,11 +800,23 @@ export const videoProcessingSyncIfNeeded = async () => {
     // the app's session, without waiting for the next sync to happen.
     _state.haveSyncedOnce = true;
 
-    if (isHLSGenerationEnabled()) {
-        _state.jasnaConfigured =
-            await isJasnaStreamProcessingConfigured(ensureElectron());
+    let jasnaStatus: Awaited<
+        ReturnType<typeof readJasnaStreamProcessingStatus>
+    > = { configured: false, concurrent: false };
+    try {
+        jasnaStatus = await readJasnaStreamProcessingStatus(ensureElectron());
+    } catch (error) {
+        log.warn("Failed to read Jasna stream processing status", error);
+    }
+    _state.jasnaConfigured = jasnaStatus.configured;
+    _state.jasnaConcurrent = jasnaStatus.concurrent;
+    if (_state.jasnaGenerator != jasnaStatus.generator)
+        _state.jasnaMigrationVerifiedFileIDs.clear();
+    _state.jasnaGenerator = jasnaStatus.generator;
 
-        await migrateVideoPreviewFailureStateIfNeeded();
+    if (isHLSGenerationEnabled()) {
+        if (_state.jasnaConcurrent)
+            await migrateVideoPreviewFailureStateIfNeeded();
         await pullProcessedFileIDs();
     }
 
@@ -1057,10 +1073,9 @@ const hasPendingRemoteRecreateWork = () =>
     _state.liveQueue.some((item) => item.remoteRecreateRequest !== undefined);
 
 /**
- * The video processing loop keeps two items in flight, preferring items in the
- * liveQueue, otherwise working from the backlog. The native Jasna client still
- * admits one GPU job at a time, so the second item downloads and prepares its
- * seekable input while the first item is restored, encoded, or uploaded.
+ * The video processing loop prefers items in the liveQueue, otherwise working
+ * from the backlog. Jasna keeps eight items in flight so its bounded native
+ * queue can supply the model-specific batches. Other HLS paths keep two.
  *
  * [Note: Exiting idle wait of processing loop]
  *
@@ -1111,6 +1126,10 @@ const processQueue = async () => {
     let bq: typeof _state.liveQueue | undefined;
     const active = new Map<Promise<void>, VideoProcessingQueueItem>();
     const activeFileIDs = new Set<number>();
+    const processingPipelineWidth = () =>
+        _state.jasnaConcurrent
+            ? jasnaProcessingPipelineWidth
+            : standardProcessingPipelineWidth;
     let lastLoggedQueueSnapshot: string | undefined;
 
     const remainingCount = () => _state.liveQueue.length + (bq?.length ?? 0);
@@ -1195,7 +1214,7 @@ const processQueue = async () => {
 
     while (isHLSGenerationEnabled() || hasPendingRemoteRecreateWork()) {
         let loadedBackfill = false;
-        while (active.size < processingPipelineWidth) {
+        while (active.size < processingPipelineWidth()) {
             const coolingFileIDs = transientRetries.blockedFileIDs();
             const liveIndex = _state.liveQueue.findIndex(
                 (candidate) =>
@@ -1309,7 +1328,7 @@ const shouldRecreateLowQualityStream = async (
     }
     const { type, size, generator } = parsedPlaylist.data;
     if (type != "hls_video") return false;
-    if (_state.jasnaConfigured && generator != jasnaStreamGenerator)
+    if (_state.jasnaGenerator && generator != _state.jasnaGenerator)
         return true;
 
     const durationSeconds = file.metadata.duration;

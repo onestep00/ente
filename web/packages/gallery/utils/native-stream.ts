@@ -180,13 +180,18 @@ const GenerateHLSProgress = z.object({
     progress: z.number(),
 });
 
-export const isJasnaStreamProcessingConfigured = async (electron: Electron) => {
+export const readJasnaStreamProcessingStatus = async (electron: Electron) => {
     void electron;
     const res = await fetch("stream://video?op=jasna-status");
     if (!res.ok)
         throw new Error(`Failed to read Jasna status: HTTP ${res.status}`);
-    return z.object({ configured: z.boolean() }).parse(await res.json())
-        .configured;
+    return z
+        .object({
+            configured: z.boolean(),
+            concurrent: z.boolean(),
+            generator: z.string().optional(),
+        })
+        .parse(await res.json());
 };
 
 /**

@@ -92,7 +92,7 @@
   업데이트를 실행하지 않는다. 공개 설치 파일이 Jasna 통합 빌드를 덮어쓰게
   해서는 안 된다.
 - 설정 파일은 `%LOCALAPPDATA%\ente\jasna\config.json`이다.
-- 현재 기본값은 `generator=jasna-ente-v5`, `detectionModel=rfdetr-v6`,
+- 현재 기본값은 `generator=jasna-ente-v6`, `detectionModel=rfdetr-v6`,
   `detectionScoreThreshold=0.15`, `secondaryRestoration=unet-4x`,
   `batchSize=16`, `maxClipSize=2880`, `compileBasicVSRPP=true`이다.
 - Jasna 직접 검증은 Ente 업로드와 분리된 격리 입력·출력으로 수행한다.

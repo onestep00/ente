@@ -21,12 +21,14 @@ const startupTimeoutMs = 60 * 60 * 1000;
 const statusPollIntervalMs = 250;
 const jobStallTimeoutMs = 2 * 60 * 1000;
 const heartbeatTimeoutMs = 5 * 1000;
+const nativeJobCleanupTimeoutMs = 30 * 1000;
 const maximumJobTimeoutMs = 24 * 60 * 60 * 1000;
 const maximumJobAttempts = 2;
 const jasnaConfigEnvVar = "ENTE_JASNA_CONFIG";
+const legacyJasnaGenerator = "jasna-ente-v5";
 
 const defaultJasnaConfig = {
-    generator: "jasna-ente-v5",
+    generator: "jasna-ente-v6",
     batchSize: 16,
     maxClipSize: 2880,
     temporalOverlap: 15,
@@ -114,6 +116,8 @@ let installRetryAfter = 0;
 let lastInstallError: Error | undefined;
 let firewalledExecutable: string | undefined;
 let workerSupportsDynamicJobs = false;
+let workerSupportsNativeJobV1 = false;
+let workerGenerator: string | undefined;
 
 type JasnaJobFailureKind = "source" | "worker";
 
@@ -368,8 +372,9 @@ const readJasnaConfig = async (): Promise<JasnaConfig> => {
         throw new Error(
             `Jasna config ${configPath} must contain a JSON object`,
         );
+    const legacyV5Config = parsed.generator == legacyJasnaGenerator;
     const legacyManagedConfig =
-        parsed.generator == "jasna-ente-v5" &&
+        legacyV5Config &&
         parsed.batchSize == 16 &&
         parsed.maxClipSize == 600 &&
         parsed.temporalOverlap == 15 &&
@@ -388,6 +393,7 @@ const readJasnaConfig = async (): Promise<JasnaConfig> => {
                   logLevel: defaultJasnaConfig.logLevel,
               }
             : {}),
+        ...(legacyV5Config ? { generator: defaultJasnaConfig.generator } : {}),
     };
     const config: JasnaConfig = {
         generator: assertConfigGenerator(candidate.generator),
@@ -443,21 +449,18 @@ const readJasnaConfig = async (): Promise<JasnaConfig> => {
             "Jasna config temporalOverlap must be less than half of maxClipSize",
         );
     log.info(`Loaded Jasna config from ${configPath}`);
-    if (legacyManagedConfig) {
+    if (legacyV5Config) {
         await fs.writeFile(
             configPath,
             `${JSON.stringify(config, undefined, 2)}\n`,
             "utf8",
         );
         log.info(
-            `Migrated legacy Jasna config to tuned defaults at ${configPath}`,
+            `Migrated legacy Jasna config to ${defaultJasnaConfig.generator} at ${configPath}`,
         );
     }
     return config;
 };
-
-export const getJasnaGenerator = async () =>
-    (await readJasnaConfig()).generator;
 
 const managedManifestPath = () =>
     path.join(workerPaths!.installDirectory, "current.json");
@@ -756,41 +759,84 @@ const configuredArgs = (supportsDynamicJobs: boolean, config: JasnaConfig) => {
     return [...defaults, ...parsed];
 };
 
-const supportsDynamicJobs = async (executable: string) => {
+const detectCapabilities = async (executable: string) => {
     try {
         const { stdout } = await execFileAsync(executable, ["--help"], {
             timeout: 30_000,
             windowsHide: true,
             maxBuffer: 4 * 1024 * 1024,
         });
-        return (
-            stdout.includes("--stream-workers") &&
-            stdout.includes("--primary-clip-batch-size")
-        );
+        return {
+            dynamicJobs:
+                stdout.includes("--stream-workers") &&
+                stdout.includes("--primary-clip-batch-size"),
+            nativeJobV1: stdout.includes("--ente-native-job-v1"),
+            inspected: true,
+        };
     } catch (error) {
         log.warn(
             "Could not inspect Jasna capabilities; using legacy mode",
             error,
         );
-        return false;
+        return { dynamicJobs: false, nativeJobV1: false, inspected: false };
     }
 };
 
-const installProxy = async (jasnaPath: string) => {
+export const readJasnaRuntimeStatus = async () => {
+    const configured = isJasnaConfigured();
+    if (!configured)
+        return { configured, concurrent: false, generator: undefined };
+    if (child?.exitCode === null && workerGenerator)
+        return {
+            configured,
+            concurrent: workerSupportsNativeJobV1,
+            generator: workerGenerator,
+        };
+    const executable = process.env[jasnaPathEnvVar]?.trim();
+    if (!executable)
+        return {
+            configured,
+            concurrent: false,
+            generator: legacyJasnaGenerator,
+        };
+    try {
+        await fs.access(executable);
+        const capabilities = await detectCapabilities(executable);
+        if (!capabilities.inspected)
+            return { configured, concurrent: false, generator: undefined };
+        const concurrent = capabilities.nativeJobV1;
+        return {
+            configured,
+            concurrent,
+            generator: concurrent
+                ? (await readJasnaConfig()).generator
+                : legacyJasnaGenerator,
+        };
+    } catch (error) {
+        log.warn("Could not inspect the configured Jasna executable", error);
+        return { configured, concurrent: false, generator: undefined };
+    }
+};
+
+const prepareRuntime = async (jasnaPath: string, nativeJobV1: boolean) => {
     const paths = workerPaths;
     if (!paths) throw new Error("Jasna worker was not initialized");
+    const jobsDirectory = path.join(paths.runtimeDirectory, "jobs");
+    await Promise.all([
+        fs.access(jasnaPath),
+        fs.access(paths.proxyPath),
+        fs.mkdir(jobsDirectory, { recursive: true }),
+    ]);
+    if (nativeJobV1) {
+        await restoreLegacyProxyIfPresent(jasnaPath);
+        return { jobsDirectory, realFFmpegPath: undefined };
+    }
+
     const toolsDirectory = path.join(path.dirname(jasnaPath), "tools");
     const ffmpegPath = path.join(toolsDirectory, "ffmpeg.exe");
     const realFFmpegPath = path.join(toolsDirectory, "ffmpeg.jasna.exe");
     const manifestPath = path.join(toolsDirectory, "ente-ffmpeg-proxy.json");
-    await Promise.all([
-        fs.access(jasnaPath),
-        fs.access(paths.proxyPath),
-        fs.access(ffmpegPath),
-        fs.mkdir(paths.runtimeDirectory, { recursive: true }),
-    ]);
-    const jobsDirectory = path.join(paths.runtimeDirectory, "jobs");
-    await fs.mkdir(jobsDirectory, { recursive: true });
+    await fs.access(ffmpegPath);
     const [currentHash, proxyHash, manifest] = await Promise.all([
         fileHash(ffmpegPath),
         fileHash(paths.proxyPath),
@@ -816,6 +862,15 @@ const fileHash = async (filePath: string) =>
         .update(await fs.readFile(filePath))
         .digest("hex");
 
+const fileHashIfPresent = async (filePath: string) => {
+    try {
+        return await fileHash(filePath);
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code == "ENOENT") return undefined;
+        throw error;
+    }
+};
+
 const readProxyManifest = async (manifestPath: string) => {
     try {
         const value = JSON.parse(
@@ -829,6 +884,59 @@ const readProxyManifest = async (manifestPath: string) => {
             return undefined;
         throw error;
     }
+};
+
+const restoreLegacyProxyIfPresent = async (jasnaPath: string) => {
+    const toolsDirectory = path.join(path.dirname(jasnaPath), "tools");
+    const ffmpegPath = path.join(toolsDirectory, "ffmpeg.exe");
+    const realFFmpegPath = path.join(toolsDirectory, "ffmpeg.jasna.exe");
+    const manifestPath = path.join(toolsDirectory, "ente-ffmpeg-proxy.json");
+    const manifest = await readProxyManifest(manifestPath);
+    if (!manifest) return;
+
+    const [currentHash, backupHash] = await Promise.all([
+        fileHashIfPresent(ffmpegPath),
+        fileHashIfPresent(realFFmpegPath),
+    ]);
+    if (!backupHash) {
+        if (currentHash == manifest.installedProxyHash)
+            throw new Error(
+                `Cannot restore the Jasna FFmpeg replaced by Ente; backup is missing at ${realFFmpegPath}`,
+            );
+        log.warn(
+            `Keeping legacy Jasna proxy manifest because its backup is missing: ${manifestPath}`,
+        );
+        return;
+    }
+    if (
+        currentHash != undefined &&
+        currentHash != manifest.installedProxyHash
+    ) {
+        if (currentHash != backupHash) {
+            log.warn(
+                `Keeping legacy Jasna proxy recovery files because ${ffmpegPath} has an unknown hash`,
+            );
+            return;
+        }
+    } else {
+        const temporaryPath = `${ffmpegPath}.ente-restore-${randomUUID()}.tmp`;
+        try {
+            await fs.copyFile(realFFmpegPath, temporaryPath);
+            if ((await fileHash(temporaryPath)) != backupHash)
+                throw new Error(
+                    "Jasna FFmpeg restore copy failed verification",
+                );
+            await fs.rename(temporaryPath, ffmpegPath);
+            if ((await fileHash(ffmpegPath)) != backupHash)
+                throw new Error("Restored Jasna FFmpeg failed verification");
+        } finally {
+            await fs.rm(temporaryPath, { force: true });
+        }
+    }
+    await Promise.all([
+        fs.rm(realFFmpegPath, { force: true }),
+        fs.rm(manifestPath, { force: true }),
+    ]);
 };
 
 const reservePort = () =>
@@ -859,9 +967,17 @@ const startWorkerOnce = async () => {
         });
     }
     await ensureInboundBlocked(executable);
-    workerSupportsDynamicJobs = await supportsDynamicJobs(executable);
+    const capabilities = await detectCapabilities(executable);
+    workerSupportsDynamicJobs = capabilities.dynamicJobs;
+    workerSupportsNativeJobV1 = capabilities.nativeJobV1;
     const config = await readJasnaConfig();
-    const { jobsDirectory, realFFmpegPath } = await installProxy(executable);
+    workerGenerator = capabilities.nativeJobV1
+        ? config.generator
+        : legacyJasnaGenerator;
+    const { jobsDirectory, realFFmpegPath } = await prepareRuntime(
+        executable,
+        workerSupportsNativeJobV1,
+    );
     const port = await reservePort();
     const args = configuredArgs(workerSupportsDynamicJobs, config);
     log.info(
@@ -875,6 +991,7 @@ const startWorkerOnce = async () => {
             secondaryRestoration: config.secondaryRestoration,
             logLevel: config.logLevel,
             supportsDynamicJobs: workerSupportsDynamicJobs,
+            nativeJobV1: workerSupportsNativeJobV1,
             args,
         })}`,
     );
@@ -908,11 +1025,11 @@ const startWorkerOnce = async () => {
     workerPort = port;
     readline.createInterface({ input: worker.stdout }).on("line", (line) => {
         log.info(`[jasna] ${line}`);
-        reportJasnaFailure(line);
+        if (!capabilities.nativeJobV1) reportJasnaFailure(line);
     });
     readline.createInterface({ input: worker.stderr }).on("line", (line) => {
         log.warn(`[jasna] ${line}`);
-        reportJasnaFailure(line);
+        if (!capabilities.nativeJobV1) reportJasnaFailure(line);
     });
     const exited = new Promise<never>((_, reject) => {
         worker.once("error", reject);
@@ -922,6 +1039,8 @@ const startWorkerOnce = async () => {
                 workerPort = undefined;
                 readyPromise = undefined;
                 workerSupportsDynamicJobs = false;
+                workerSupportsNativeJobV1 = false;
+                workerGenerator = undefined;
             }
             reject(new Error(`Jasna exited (code ${code}, signal ${signal})`));
         });
@@ -985,6 +1104,9 @@ const startWorker = () => {
             child = undefined;
             workerPort = undefined;
             readyPromise = undefined;
+            workerSupportsDynamicJobs = false;
+            workerSupportsNativeJobV1 = false;
+            workerGenerator = undefined;
             throw error;
         })
         .finally(() => {
@@ -993,14 +1115,17 @@ const startWorker = () => {
     return startingPromise;
 };
 
-const stopWorker = async () => {
+const stopWorker = async (expectedWorker: ChildProcessWithoutNullStreams) => {
     const worker = child;
+    if (worker !== expectedWorker) return;
     child = undefined;
     workerPort = undefined;
     readyPromise = undefined;
     startingPromise = undefined;
     workerSupportsDynamicJobs = false;
-    if (!worker || worker.exitCode !== null) return;
+    workerSupportsNativeJobV1 = false;
+    workerGenerator = undefined;
+    if (worker.exitCode !== null) return;
     const exited = new Promise<void>((resolve) => worker.once("exit", resolve));
     worker.kill();
     await Promise.race([
@@ -1034,14 +1159,23 @@ const runJasnaHLSJobUnlocked = async (job: JasnaJob) => {
     log.info(`Jasna HLS started for file ${job.fileID}`);
     let lastError: unknown;
     for (let attempt = 1; attempt <= maximumJobAttempts; attempt++) {
+        let attemptWorker: ChildProcessWithoutNullStreams | undefined;
+        let attemptSupportsNativeJobV1 = false;
+        let attemptGenerator: string | undefined;
         try {
+            await startWorker();
+            attemptWorker = child;
+            attemptSupportsNativeJobV1 = workerSupportsNativeJobV1;
+            attemptGenerator = workerGenerator;
             const completion = await runJasnaHLSAttempt(job);
             if (completion.recoveredFromOutput) {
                 log.warn(
                     "Jasna FFmpeg completed without publishing status; keeping the ready worker",
                 );
             }
-            return;
+            if (!attemptGenerator)
+                throw new Error("Jasna generator was not initialized");
+            return attemptGenerator;
         } catch (error) {
             lastError = error;
             log.warn(
@@ -1050,11 +1184,20 @@ const runJasnaHLSJobUnlocked = async (job: JasnaJob) => {
             );
             const jasnaFailure =
                 error instanceof JasnaJobFailure ? error : undefined;
-            // A failed attempt can leave Jasna's internal queues or threads in
-            // a broken state even when its HTTP server is still responding.
-            // Always restart the worker before the next attempt; this is also
-            // what releases a model that would otherwise sit idle in VRAM.
-            await stopWorker();
+            // Native v1 jobs fail independently. A deterministic source
+            // rejection must not evict unrelated work from the shared worker.
+            if (jasnaFailure?.kind == "source" && attemptSupportsNativeJobV1) {
+                log.warn(
+                    `Skipping file ${job.fileID} after Jasna rejected its source`,
+                    error,
+                );
+                throw error;
+            }
+            // Legacy failures do not have a per-request cleanup barrier, so
+            // restart that worker before retrying. Native v1 cleanup completed
+            // inside runJasnaHLSAttempt and unrelated jobs keep running.
+            if (!attemptSupportsNativeJobV1 && attemptWorker)
+                await stopWorker(attemptWorker);
             if (String(error).includes("ENTE_JASNA_UNAVAILABLE")) throw error;
             // A corrupt source is deterministic. Retrying the same materialized
             // bytes only burns GPU time and can leave the queue stuck, so let
@@ -1081,14 +1224,15 @@ const runJasnaHLSJobUnlocked = async (job: JasnaJob) => {
 
 export const runJasnaHLSJob = async (job: JasnaJob) => {
     await startWorker();
-    if (workerSupportsDynamicJobs) return runJasnaHLSJobUnlocked(job);
+    if (workerSupportsDynamicJobs || workerSupportsNativeJobV1)
+        return runJasnaHLSJobUnlocked(job);
 
     const previous = legacyJobTail;
     let release!: () => void;
     legacyJobTail = new Promise<void>((resolve) => (release = resolve));
     await previous;
     try {
-        await runJasnaHLSJobUnlocked(job);
+        return await runJasnaHLSJobUnlocked(job);
     } finally {
         release();
     }
@@ -1106,6 +1250,7 @@ const runJasnaHLSAttempt = async (job: JasnaJob): Promise<JobCompletion> => {
     const port = workerPort;
     const runtimeDirectory = workerPaths?.runtimeDirectory;
     const activeWorker = child;
+    const nativeJobV1 = workerSupportsNativeJobV1;
     if (!port || !runtimeDirectory || !activeWorker)
         throw new Error("Jasna did not start");
     const jobId = randomUUID();
@@ -1173,7 +1318,14 @@ const runJasnaHLSAttempt = async (job: JasnaJob): Promise<JobCompletion> => {
         });
         try {
             return await Promise.race([
-                waitForJob(job, statusPath, jobId),
+                waitForJob(
+                    job,
+                    statusPath,
+                    jobId,
+                    port,
+                    nativeJobV1,
+                    controller.signal,
+                ),
                 loadFailure,
                 workerExit,
                 fatalFailure,
@@ -1182,7 +1334,20 @@ const runJasnaHLSAttempt = async (job: JasnaJob): Promise<JobCompletion> => {
             removeExitListener();
         }
     } catch (error) {
-        await stopCurrentJob(port, jobId);
+        controller.abort();
+        if (nativeJobV1) {
+            try {
+                await cancelNativeJobAndWaitForCleanup(port, jobId);
+            } catch (cleanupError) {
+                await stopWorker(activeWorker);
+                throw new Error(
+                    `ENTE_JASNA_UNAVAILABLE: cleanup failed after ${String(error)}: ${String(cleanupError)}`,
+                    { cause: cleanupError },
+                );
+            }
+        } else {
+            await stopCurrentJob(port, jobId);
+        }
         throw error;
     } finally {
         controller.abort();
@@ -1198,10 +1363,59 @@ const runJasnaHLSAttempt = async (job: JasnaJob): Promise<JobCompletion> => {
     }
 };
 
+const acknowledgeNativeJob = async (
+    port: number,
+    jobId: string,
+    expectedState: "complete" | "error",
+    signal: AbortSignal,
+) => {
+    const deadline = Date.now() + nativeJobCleanupTimeoutMs;
+    while (Date.now() < deadline) {
+        signal.throwIfAborted();
+        const timeout = AbortSignal.timeout(
+            Math.min(7000, Math.max(1, deadline - Date.now())),
+        );
+        let response: Response;
+        try {
+            response = await fetch(
+                `http://127.0.0.1:${port}/status?jobId=${encodeURIComponent(jobId)}`,
+                { signal: AbortSignal.any([signal, timeout]) },
+            );
+        } catch (error) {
+            signal.throwIfAborted();
+            if (timeout.aborted) continue;
+            throw error;
+        }
+        if (response.ok) {
+            const status = (await response.json()) as Partial<JasnaJobStatus>;
+            if (
+                status.version != 1 ||
+                status.jobId != jobId ||
+                status.state != expectedState
+            )
+                throw new Error(
+                    `Jasna terminal acknowledgement returned an invalid ${status.state ?? "unknown"} status`,
+                );
+            return;
+        }
+        if (response.status != 503)
+            throw new Error(
+                `Jasna terminal acknowledgement failed: HTTP ${response.status}`,
+            );
+        await new Promise((resolve) =>
+            setTimeout(resolve, statusPollIntervalMs),
+        );
+    }
+    throw new Error("Jasna terminal acknowledgement timed out");
+};
+
 const waitForJob = async (
     job: JasnaJob,
     statusPath: string,
     jobId: string,
+    port: number,
+    nativeJobV1: boolean,
+    signal: AbortSignal,
 ): Promise<JobCompletion> => {
     const deadline =
         Date.now() +
@@ -1214,6 +1428,7 @@ const waitForJob = async (
     let lastOutputSize = -1;
     let lastHeartbeat = 0;
     while (true) {
+        signal.throwIfAborted();
         const status = await readStatus(statusPath);
         if (status?.version == 1 && status.jobId == jobId) {
             if (
@@ -1225,14 +1440,22 @@ const waitForJob = async (
                 job.onProgress(status.progress);
             }
             if (status.state == "complete") {
+                if (nativeJobV1)
+                    await acknowledgeNativeJob(port, jobId, "complete", signal);
                 await validateCompletedOutput(job);
                 job.onProgress(1);
                 return { recoveredFromOutput: false };
             }
             if (status.state == "error") {
                 const message = status.error ?? "Jasna FFmpeg failed";
+                if (nativeJobV1)
+                    await acknowledgeNativeJob(port, jobId, "error", signal);
+                const invalidInput =
+                    /videodecodeerror|corrupt_data|invalid nal|nal unit|unsupported source frame rate|supports only H\.264\/HEVC|requires positive even source dimensions|requires AAC (?:input|packets)|video stream is missing|(?:input open|stream probe|demux|NVDEC submit) failed:.*invalid data|H\.264 input exceeds the NVDEC/i.test(
+                        message,
+                    );
                 throw new JasnaJobFailure(
-                    /corrupt|decode|nal/i.test(message) ? "source" : "worker",
+                    invalidInput ? "source" : "worker",
                     message,
                 );
             }
@@ -1249,6 +1472,8 @@ const waitForJob = async (
             lastHeartbeat = heartbeat;
         }
         if (await completedOutputIsValid(job)) {
+            if (nativeJobV1)
+                await acknowledgeNativeJob(port, jobId, "complete", signal);
             await fs
                 .rm(path.join(job.outputDir, "output.ts.tmp"), { force: true })
                 .catch((error: unknown) =>
@@ -1427,6 +1652,81 @@ const stopCurrentJob = async (port: number, jobId: string) => {
     } catch (error) {
         log.warn("Failed to stop the current Jasna job", error);
     }
+};
+
+const cancelNativeJobAndWaitForCleanup = async (
+    port: number,
+    jobId: string,
+) => {
+    const deadline = Date.now() + nativeJobCleanupTimeoutMs;
+    let stopAccepted = false;
+    while (Date.now() < deadline) {
+        const timeout = AbortSignal.timeout(
+            Math.min(5000, Math.max(1, deadline - Date.now())),
+        );
+        let response: Response;
+        try {
+            response = await fetch(`http://127.0.0.1:${port}/api/stop`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ jobId }),
+                signal: timeout,
+            });
+        } catch (error) {
+            if (timeout.aborted) continue;
+            throw error;
+        }
+        if (response.status == 404) return;
+        if (response.ok) {
+            stopAccepted = true;
+            break;
+        }
+        if (response.status != 503)
+            throw new Error(
+                `Native Jasna stop failed: HTTP ${response.status}`,
+            );
+        await new Promise((resolve) =>
+            setTimeout(resolve, statusPollIntervalMs),
+        );
+    }
+    if (!stopAccepted) throw new Error("Native Jasna stop timed out");
+
+    while (Date.now() < deadline) {
+        const timeout = AbortSignal.timeout(
+            Math.min(7000, Math.max(1, deadline - Date.now())),
+        );
+        let response: Response;
+        try {
+            response = await fetch(
+                `http://127.0.0.1:${port}/status?jobId=${encodeURIComponent(jobId)}`,
+                { signal: timeout },
+            );
+        } catch (error) {
+            if (timeout.aborted) continue;
+            throw error;
+        }
+        if (response.status == 404) return;
+        if (response.ok) {
+            const status = (await response.json()) as Partial<JasnaJobStatus>;
+            if (status.jobId != jobId)
+                throw new Error("Native Jasna cleanup returned another job");
+            if (status.state == "complete" || status.state == "error") {
+                if (status.version != 1)
+                    throw new Error(
+                        "Native Jasna cleanup returned an invalid terminal status",
+                    );
+                return;
+            }
+        } else if (response.status != 503) {
+            throw new Error(
+                `Native Jasna cleanup check failed: HTTP ${response.status}`,
+            );
+        }
+        await new Promise((resolve) =>
+            setTimeout(resolve, statusPollIntervalMs),
+        );
+    }
+    throw new Error("Native Jasna job cleanup timed out");
 };
 
 const writeJSONAtomically = async (filePath: string, value: unknown) => {

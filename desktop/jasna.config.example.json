@@ -1,5 +1,5 @@
 {
-    "generator": "jasna-ente-v5",
+    "generator": "jasna-ente-v6",
     "batchSize": 16,
     "maxClipSize": 2880,
     "temporalOverlap": 15,

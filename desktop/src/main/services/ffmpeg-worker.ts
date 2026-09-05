@@ -23,9 +23,9 @@ import {
     publicRequestHeaders,
 } from "../utils/http";
 import {
-    getJasnaGenerator,
     initializeJasnaWorker,
     isJasnaConfigured,
+    readJasnaRuntimeStatus,
     runJasnaHLSJob,
 } from "./jasna-worker-client";
 
@@ -66,7 +66,11 @@ let cachedPreferredVideoEncoder: VideoEncoder | undefined;
  * @see {@link ffmpegUtilityProcessEndpoint}.
  */
 export interface FFmpegUtilityProcess {
-    jasnaIsConfigured: () => Promise<boolean>;
+    jasnaRuntimeStatus: () => Promise<{
+        configured: boolean;
+        concurrent: boolean;
+        generator: string | undefined;
+    }>;
     ffmpegExec: (
         command: FFmpegCommand,
         inputFilePath: string,
@@ -100,7 +104,7 @@ process.parentPort.once("message", (e) => {
     // parent.
     expose(
         {
-            jasnaIsConfigured: () => Promise.resolve(isJasnaConfigured()),
+            jasnaRuntimeStatus: readJasnaRuntimeStatus,
             ffmpegExec,
             ffmpegConvertToMP4,
             ffmpegGenerateHLSPlaylistAndSegments,
@@ -422,30 +426,26 @@ const execFFmpegWithProgress = async (
         if (reportProgress) reportProgress(0);
 
         let buffer = "";
-        if (child.stdout) {
-            child.stdout.setEncoding("utf8");
-            child.stdout.on("data", (chunk: string) => {
-                buffer += chunk;
-                const lines = buffer.split(/\r?\n/);
-                buffer = lines.pop() ?? "";
-                for (const rawLine of lines) {
-                    const line = rawLine.trim();
-                    if (!line || !reportProgress || !durationSeconds) continue;
-                    const outTimeSeconds = parseProgressOutTimeSeconds(line);
-                    if (outTimeSeconds !== undefined) {
-                        reportProgress(outTimeSeconds / durationSeconds);
-                        continue;
-                    }
-                    if (line.startsWith("progress=") && line.includes("end")) {
-                        reportProgress(1);
-                    }
+        child.stdout.setEncoding("utf8");
+        child.stdout.on("data", (chunk: string) => {
+            buffer += chunk;
+            const lines = buffer.split(/\r?\n/);
+            buffer = lines.pop() ?? "";
+            for (const rawLine of lines) {
+                const line = rawLine.trim();
+                if (!line || !reportProgress || !durationSeconds) continue;
+                const outTimeSeconds = parseProgressOutTimeSeconds(line);
+                if (outTimeSeconds !== undefined) {
+                    reportProgress(outTimeSeconds / durationSeconds);
+                    continue;
                 }
-            });
-        }
+                if (line.startsWith("progress=") && line.includes("end")) {
+                    reportProgress(1);
+                }
+            }
+        });
 
-        if (child.stderr) {
-            child.stderr.pipe(stderrStream);
-        }
+        child.stderr.pipe(stderrStream);
 
         child.on("error", (e: Error) => {
             stderrStream.close();
@@ -524,9 +524,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
     authToken: string,
 ): Promise<FFmpegGenerateHLSPlaylistAndSegmentsResult | undefined> => {
     const jasnaConfigured = isJasnaConfigured();
-    const jasnaGenerator = jasnaConfigured
-        ? await getJasnaGenerator()
-        : undefined;
+    let jasnaGenerator: string | undefined;
     const {
         isH264,
         streamCopySafe,
@@ -900,7 +898,7 @@ const ffmpegGenerateHLSPlaylistAndSegments = async (
         if (jasnaConfigured) {
             if (!width || !height || !durationSeconds)
                 throw new Error("Jasna requires video dimensions and duration");
-            await runJasnaHLSJob({
+            jasnaGenerator = await runJasnaHLSJob({
                 fileID,
                 inputPath: inputFilePath,
                 outputDir: outputPathPrefix,

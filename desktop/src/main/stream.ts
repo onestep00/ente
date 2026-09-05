@@ -109,12 +109,12 @@ const handleStreamRequest = async (request: Request): Promise<Response> => {
 const handleJasnaStatus = async () => {
     try {
         const worker = await ffmpegUtilityProcess();
-        return new Response(
-            JSON.stringify({ configured: await worker.jasnaIsConfigured() }),
-        );
+        return new Response(JSON.stringify(await worker.jasnaRuntimeStatus()));
     } catch (e) {
         log.error("Jasna readiness check failed", e);
-        return new Response(JSON.stringify({ configured: false }));
+        return new Response(
+            JSON.stringify({ configured: false, concurrent: false }),
+        );
     }
 };
 

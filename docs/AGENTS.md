@@ -1,7 +1,7 @@
 # 문서 작업 규칙
 
 작성일: 2026-08-19
-갱신일: 2026-08-20
+갱신일: 2026-09-05
 상태: 적용 중
 적용 범위: `docs/`
 
@@ -17,5 +17,5 @@
 
 - `windows-client-build.md`: Windows에서 Ente Photos Android와 Desktop을
   빌드하고 Jasna stream recreation을 검증하는 절차.
-- `jasna-stream-bridge.md`: Desktop Jasna stream 처리와 Android recreation
-  요청의 동기화 경로.
+- `jasna-stream-bridge.md`: Desktop native v6 동시 stream 처리, legacy fallback,
+  요청 수명과 Android recreation 동기화 경로.
