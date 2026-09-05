@@ -77,8 +77,9 @@ interface JasnaInstallManifest {
 interface JasnaJobStatus {
     version: number;
     jobId: string;
-    state: "started" | "running" | "complete" | "error";
+    state: "queued" | "started" | "running" | "complete" | "error";
     progress?: number;
+    activity_seq?: number;
     error?: string;
 }
 
@@ -1427,10 +1428,23 @@ const waitForJob = async (
     let lastProgress = -1;
     let lastOutputSize = -1;
     let lastHeartbeat = 0;
+    let waitingForAdmission = false;
+    let lastActivitySeq = 0;
     while (true) {
         signal.throwIfAborted();
         const status = await readStatus(statusPath);
         if (status?.version == 1 && status.jobId == jobId) {
+            const queued = nativeJobV1 && status.state == "queued";
+            if (waitingForAdmission && !queued) lastJobActivity = Date.now();
+            waitingForAdmission = queued;
+            if (
+                nativeJobV1 &&
+                Number.isSafeInteger(status.activity_seq) &&
+                status.activity_seq! > lastActivitySeq
+            ) {
+                lastActivitySeq = status.activity_seq!;
+                lastJobActivity = Date.now();
+            }
             if (
                 typeof status.progress == "number" &&
                 status.progress > lastProgress
@@ -1489,7 +1503,7 @@ const waitForJob = async (
         const now = Date.now();
         if (lastHeartbeat > 0 && now - lastHeartbeat >= heartbeatTimeoutMs)
             throw new Error("Jasna FFmpeg heartbeat stopped for 5 seconds");
-        if (now - lastJobActivity >= jobStallTimeoutMs)
+        if (!waitingForAdmission && now - lastJobActivity >= jobStallTimeoutMs)
             throw new Error("Jasna job made no progress for 2 minutes");
         await new Promise((resolve) =>
             setTimeout(resolve, statusPollIntervalMs),
