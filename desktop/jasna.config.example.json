@@ -12,5 +12,35 @@
     "primaryClipBatchSize": "auto",
     "streamWorkers": "auto",
     "logLevel": "warning",
-    "extraArgs": []
+    "extraArgs": [],
+    "dlssnr": {
+        "style": 1,
+        "preset": 3,
+        "intensity": 0.7,
+        "tone": 0,
+        "structure": 1,
+        "skin": -1,
+        "autoMask": false
+    },
+    "encoding": {
+        "codec": "h264_nvenc",
+        "preset": "p7",
+        "tune": "hq",
+        "rateControl": "vbr",
+        "cq": 17,
+        "multipass": "fullres",
+        "lookahead": 32,
+        "spatialAQ": true,
+        "temporalAQ": true,
+        "aqStrength": 8,
+        "bFrames": 4,
+        "bRefMode": "middle",
+        "vbvBufferSeconds": 4,
+        "audio": "copy",
+        "minBitrate": 4000000,
+        "targetBitrate": 8000000,
+        "maxBitrate": 8000000,
+        "maxFps": 60,
+        "segmentDuration": 2
+    }
 }

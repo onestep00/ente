@@ -13,6 +13,12 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 import log from "../log-worker";
+import {
+    defaultVideoSettings,
+    parseVideoSettings,
+    videoJobSettings,
+    type JasnaVideoSettings,
+} from "./jasna-video-settings";
 
 const jasnaPathEnvVar = "ENTE_JASNA_PATH";
 const jasnaArgsEnvVar = "ENTE_JASNA_ARGS_JSON";
@@ -28,6 +34,7 @@ const jasnaConfigEnvVar = "ENTE_JASNA_CONFIG";
 const legacyJasnaGenerator = "jasna-ente-v5";
 
 const defaultJasnaConfig = {
+    ...defaultVideoSettings,
     generator: "jasna-ente-v6",
     batchSize: 16,
     maxClipSize: 2880,
@@ -44,7 +51,7 @@ const defaultJasnaConfig = {
     extraArgs: [] as string[],
 } as const;
 
-interface JasnaConfig {
+interface JasnaConfig extends JasnaVideoSettings {
     generator: string;
     batchSize: number;
     maxClipSize: number;
@@ -118,6 +125,7 @@ let lastInstallError: Error | undefined;
 let firewalledExecutable: string | undefined;
 let workerSupportsDynamicJobs = false;
 let workerSupportsNativeJobV1 = false;
+let workerSupportsVideoSettings = false;
 let workerGenerator: string | undefined;
 
 type JasnaJobFailureKind = "source" | "worker";
@@ -360,9 +368,10 @@ const readJasnaConfig = async (): Promise<JasnaConfig> => {
             });
         }
         await fs.mkdir(path.dirname(configPath), { recursive: true });
+        const { dlssnr, encoding, ...legacyDefaults } = defaultJasnaConfig;
         await fs.writeFile(
             configPath,
-            `${JSON.stringify(defaultJasnaConfig, undefined, 2)}\n`,
+            `${JSON.stringify(workerSupportsVideoSettings ? { ...legacyDefaults, dlssnr, encoding } : legacyDefaults, undefined, 2)}\n`,
             "utf8",
         );
         log.info(`Created default Jasna config at ${configPath}`);
@@ -397,6 +406,7 @@ const readJasnaConfig = async (): Promise<JasnaConfig> => {
         ...(legacyV5Config ? { generator: defaultJasnaConfig.generator } : {}),
     };
     const config: JasnaConfig = {
+        ...parseVideoSettings(parsed),
         generator: assertConfigGenerator(candidate.generator),
         batchSize: assertConfigInteger(candidate.batchSize, "batchSize", 1, 64),
         maxClipSize: assertConfigInteger(
@@ -453,7 +463,7 @@ const readJasnaConfig = async (): Promise<JasnaConfig> => {
     if (legacyV5Config) {
         await fs.writeFile(
             configPath,
-            `${JSON.stringify(config, undefined, 2)}\n`,
+            `${JSON.stringify({ ...config, dlssnr: parsed.dlssnr, encoding: parsed.encoding }, undefined, 2)}\n`,
             "utf8",
         );
         log.info(
@@ -772,6 +782,7 @@ const detectCapabilities = async (executable: string) => {
                 stdout.includes("--stream-workers") &&
                 stdout.includes("--primary-clip-batch-size"),
             nativeJobV1: stdout.includes("--ente-native-job-v1"),
+            videoSettings: stdout.includes("--ente-video-settings-v1"),
             inspected: true,
         };
     } catch (error) {
@@ -779,7 +790,12 @@ const detectCapabilities = async (executable: string) => {
             "Could not inspect Jasna capabilities; using legacy mode",
             error,
         );
-        return { dynamicJobs: false, nativeJobV1: false, inspected: false };
+        return {
+            dynamicJobs: false,
+            nativeJobV1: false,
+            videoSettings: false,
+            inspected: false,
+        };
     }
 };
 
@@ -971,6 +987,8 @@ const startWorkerOnce = async () => {
     const capabilities = await detectCapabilities(executable);
     workerSupportsDynamicJobs = capabilities.dynamicJobs;
     workerSupportsNativeJobV1 = capabilities.nativeJobV1;
+    workerSupportsVideoSettings =
+        capabilities.nativeJobV1 && capabilities.videoSettings;
     const config = await readJasnaConfig();
     workerGenerator = capabilities.nativeJobV1
         ? config.generator
@@ -1041,6 +1059,7 @@ const startWorkerOnce = async () => {
                 readyPromise = undefined;
                 workerSupportsDynamicJobs = false;
                 workerSupportsNativeJobV1 = false;
+                workerSupportsVideoSettings = false;
                 workerGenerator = undefined;
             }
             reject(new Error(`Jasna exited (code ${code}, signal ${signal})`));
@@ -1107,6 +1126,7 @@ const startWorker = () => {
             readyPromise = undefined;
             workerSupportsDynamicJobs = false;
             workerSupportsNativeJobV1 = false;
+            workerSupportsVideoSettings = false;
             workerGenerator = undefined;
             throw error;
         })
@@ -1125,6 +1145,7 @@ const stopWorker = async (expectedWorker: ChildProcessWithoutNullStreams) => {
     startingPromise = undefined;
     workerSupportsDynamicJobs = false;
     workerSupportsNativeJobV1 = false;
+    workerSupportsVideoSettings = false;
     workerGenerator = undefined;
     if (worker.exitCode !== null) return;
     const exited = new Promise<void>((resolve) => worker.once("exit", resolve));
@@ -1252,8 +1273,14 @@ const runJasnaHLSAttempt = async (job: JasnaJob): Promise<JobCompletion> => {
     const runtimeDirectory = workerPaths?.runtimeDirectory;
     const activeWorker = child;
     const nativeJobV1 = workerSupportsNativeJobV1;
+    const supportsVideoSettings = workerSupportsVideoSettings;
     if (!port || !runtimeDirectory || !activeWorker)
         throw new Error("Jasna did not start");
+    // Read once before publishing the request; later file edits affect new jobs.
+    const videoSettings = videoJobSettings(
+        JSON.parse(await fs.readFile(jasnaConfigPath(), "utf8")),
+        supportsVideoSettings,
+    );
     const jobId = randomUUID();
     const jobsDirectory = path.join(runtimeDirectory, "jobs");
     await fs.mkdir(jobsDirectory, { recursive: true });
@@ -1271,12 +1298,11 @@ const runJasnaHLSAttempt = async (job: JasnaJob): Promise<JobCompletion> => {
         statusPath,
         durationSeconds: job.durationSeconds,
         sourceFps: job.fps,
-        segmentDuration: 2,
-        minBitrate: 4_000_000,
-        targetBitrate: 6_000_000,
-        maxBitrate: 8_000_000,
-        maxFps: 60,
+        ...videoSettings,
     });
+    log.info(
+        `[jasna] video settings ${JSON.stringify({ jobId, ...videoSettings })}`,
+    );
     try {
         let rejectFatalFailure!: (error: JasnaJobFailure) => void;
         const fatalFailure = new Promise<never>((_, reject) => {
